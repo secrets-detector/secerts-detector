@@ -9,7 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"secret-validator/pkg/models"
+	"secret-detector/pkg/models"
 )
 
 func validateCertificate(cert string) bool {

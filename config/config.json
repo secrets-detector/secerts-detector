@@ -13,7 +13,7 @@
         "slack_webhook": "https://hooks\\.slack\\.com/services/T[a-zA-Z0-9_]{8}/B[a-zA-Z0-9_]{8}/[a-zA-Z0-9_]{24}"
     },
     "api": {
-        "validate_endpoint": "http://validation-service:8080/validate",
+        "validate_endpoint": "http://localhost:8080/validate",
         "token": "your-auth-token-here",
         "timeout_seconds": 30,
         "retry_attempts": 3
@@ -51,22 +51,22 @@
             "max_diff_size_mb": 50
         }
     },
-    // "notifications": {
-    //     "email": {
-    //         "enabled": true,
-    //         "smtp_host": "smtp.company.com",
-    //         "smtp_port": 587,
-    //         "smtp_user": "notifications@company.com",
-    //         "smtp_password": "your-smtp-password",
-    //         "from": "git-security@company.com",
-    //         "to": ["security-team@company.com"]
-    //     },
-    //     "slack": {
-    //         "enabled": true,
-    //         "webhook_url": "https://hooks.slack.com/services/your-webhook-url",
-    //         "channel": "#security-alerts"
-    //     }
-    // },
+    "notifications": {
+        "email": {
+            "enabled": true,
+            "smtp_host": "smtp.company.com",
+            "smtp_port": 587,
+            "smtp_user": "notifications@company.com",
+            "smtp_password": "your-smtp-password",
+            "from": "git-security@company.com",
+            "to": ["security-team@company.com"]
+        },
+        "slack": {
+            "enabled": true,
+            "webhook_url": "https://hooks.slack.com/services/your-webhook-url",
+            "channel": "#security-alerts"
+        }
+    },
     "validation": {
         "certificate": {
             "check_expiry": true,

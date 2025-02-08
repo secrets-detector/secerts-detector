@@ -10,7 +10,7 @@ import (
 	"regexp"
 	"strings"
 
-	"secret-validator/pkg/models"
+	"secrets-detector/pkg/models"
 )
 
 type Config struct {

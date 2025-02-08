@@ -1,5 +1,5 @@
 // validation_service.go
-package main
+package validator
 
 import (
 	"crypto/x509"
