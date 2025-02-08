@@ -9,7 +9,7 @@ services:
       - ./config:/app/config
       - ./logs:/var/log/secret-validator
     environment:
-      - VALIDATION_SERVICE_URL=http://validation-service:8080
+      - VALIDATION_SERVICE_URL=http://localhost:8080
     networks:
       - secret-validator-network
 
