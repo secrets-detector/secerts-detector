@@ -1,0 +1,88 @@
+{
+    "patterns": {
+        "aws_key": "AKIA[0-9A-Z]{16}",
+        "aws_secret": "(?i)[0-9a-z]{40}",
+        "private_key": "-----BEGIN\\s*(?:RSA|DSA|EC|OPENSSH|PRIVATE)\\s*KEY-----",
+        "certificate": "-----BEGIN\\s*CERTIFICATE-----",
+        "github_token": "gh[pos]_[0-9a-zA-Z]{36}",
+        "jwt_token": "eyJ[A-Za-z0-9-_=]+\\.[A-Za-z0-9-_=]+\\.?[A-Za-z0-9-_.+/=]*",
+        "ssh_key": "ssh-rsa\\s+[A-Za-z0-9+/]+[=]{0,3}(\\s+[^@]+@[^@]+)?",
+        "google_api": "AIza[0-9A-Za-z\\-_]{35}",
+        "stripe_key": "(?i)(sk|pk)_(test|live)_[0-9a-z]{24,99}",
+        "slack_token": "xox[baprs]-([0-9a-zA-Z]{10,48})?",
+        "slack_webhook": "https://hooks\\.slack\\.com/services/T[a-zA-Z0-9_]{8}/B[a-zA-Z0-9_]{8}/[a-zA-Z0-9_]{24}"
+    },
+    "api": {
+        "validate_endpoint": "http://validation-service:8080/validate",
+        "token": "your-auth-token-here",
+        "timeout_seconds": 30,
+        "retry_attempts": 3
+    },
+    "logging": {
+        "level": "INFO",
+        "file": "/var/log/secret-validator.log",
+        "max_size_mb": 100,
+        "max_backups": 3,
+        "max_age_days": 28,
+        "compress": true
+    },
+    "rules": {
+        "block_on_validation_failure": true,
+        "notify_admins": true,
+        "allowed_branches": [
+            "develop",
+            "feature/*",
+            "bugfix/*",
+            "release/*"
+        ],
+        "excluded_files": [
+            "*.test.key",
+            "test/fixtures/*",
+            "**/*.md",
+            "docs/*"
+        ],
+        "excluded_paths": [
+            ".git/*",
+            "node_modules/*",
+            "vendor/*"
+        ],
+        "size_limits": {
+            "max_file_size_mb": 10,
+            "max_diff_size_mb": 50
+        }
+    },
+    // "notifications": {
+    //     "email": {
+    //         "enabled": true,
+    //         "smtp_host": "smtp.company.com",
+    //         "smtp_port": 587,
+    //         "smtp_user": "notifications@company.com",
+    //         "smtp_password": "your-smtp-password",
+    //         "from": "git-security@company.com",
+    //         "to": ["security-team@company.com"]
+    //     },
+    //     "slack": {
+    //         "enabled": true,
+    //         "webhook_url": "https://hooks.slack.com/services/your-webhook-url",
+    //         "channel": "#security-alerts"
+    //     }
+    // },
+    "validation": {
+        "certificate": {
+            "check_expiry": true,
+            "min_days_valid": 30,
+            "allowed_issuers": [
+                "Let's Encrypt",
+                "Company Internal CA"
+            ]
+        },
+        "private_key": {
+            "min_key_size": 2048,
+            "allowed_types": ["RSA", "EC"]
+        },
+        "api_keys": {
+            "validate_format": true,
+            "check_revocation": true
+        }
+    }
+}
