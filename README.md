@@ -79,6 +79,21 @@ curl -X POST http://localhost:8080/validate \
   }'
 ```
 
+To run the tests:
+```
+# Run all tests
+go test ./...
+
+# Run tests with coverage
+go test ./... -cover
+
+# Run specific test
+go test ./cmd/validator -run TestValidateContent
+
+# Run tests with verbose output
+go test -v ./...
+```
+
 ### Validation Rules
 
 The service validates several types of secrets:

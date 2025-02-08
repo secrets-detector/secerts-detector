@@ -35,6 +35,9 @@ type Validator struct {
 	logger   *log.Logger
 }
 
+// For mocking in tests
+var execCommand = exec.Command
+
 func NewValidator(configPath string) (*Validator, error) {
 	config, err := loadConfig(configPath)
 	if err != nil {
