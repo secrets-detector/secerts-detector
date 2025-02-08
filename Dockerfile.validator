@@ -3,7 +3,7 @@ FROM golang:1.23-bookworm AS builder
 
 WORKDIR /app
 
-# Copy go mod and sum files
+# Copy go mod files
 COPY go.mod go.sum ./
 
 # Download dependencies
@@ -13,18 +13,18 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -o secret-validator
+RUN CGO_ENABLED=0 GOOS=linux go build -o secret-validator ./cmd/validator
 
 # Final stage
 FROM debian:bookworm-slim
 
-RUN apk add --no-cache git
+RUN apt-get update && apt-get install -y git
 
 WORKDIR /app
 
 # Copy the binary from builder
 COPY --from=builder /app/secret-validator .
-COPY config.json .
+COPY config/config.json .
 
 # Create directory for logs
 RUN mkdir -p /var/log/secret-validator

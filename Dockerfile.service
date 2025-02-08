@@ -3,7 +3,7 @@ FROM golang:1.23-bookworm AS builder
 
 WORKDIR /app
 
-# Copy go mod and sum files
+# Copy go mod files
 COPY go.mod go.sum ./
 
 # Download dependencies
@@ -13,7 +13,7 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -o validation-service validation_service.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o validation-service ./cmd/service
 
 # Final stage
 FROM debian:bookworm-slim
