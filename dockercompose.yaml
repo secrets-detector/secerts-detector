@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  validator:
+    build:
+      context: .
+      dockerfile: Dockerfile.validator
+    volumes:
+      - ./config:/app/config
+      - ./logs:/var/log/secret-validator
+    environment:
+      - VALIDATION_SERVICE_URL=http://validation-service:8080
+    networks:
+      - secret-validator-network
+
+  validation-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+    ports:
+      - "8080:8080"
+    environment:
+      - GIN_MODE=release
+      - PORT=8080
+    networks:
+      - secret-validator-network
+
+networks:
+  secret-validator-network:
+    driver: bridge
