@@ -6,6 +6,7 @@ require (
 	github.com/bradleyfalzon/ghinstallation/v2 v2.5.0
 	github.com/gin-gonic/gin v1.10.0
 	github.com/google/go-github/v45 v45.2.0
+	github.com/lib/pq v1.10.9
 	github.com/stretchr/testify v1.10.0
 )
 

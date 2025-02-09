@@ -1,5 +1,4 @@
 version: '3.8'
-
 services:
   validator:
     build:
@@ -10,8 +9,14 @@ services:
       - ./logs:/var/log/secret-validator
     environment:
       - VALIDATION_SERVICE_URL=http://validation-service:8080
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=secretsuser
+      - DB_PASSWORD=secretspass
+      - DB_NAME=secretsdb
     depends_on:
       - validation-service
+      - postgres
     networks:
       - secret-validator-network
 
@@ -24,6 +29,13 @@ services:
     environment:
       - GIN_MODE=release
       - PORT=8080
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=secretsuser
+      - DB_PASSWORD=secretspass
+      - DB_NAME=secretsdb
+    depends_on:
+      - postgres
     networks:
       - secret-validator-network
 
@@ -37,19 +49,57 @@ services:
       - ./config/config.json:/app/config/config.json
       - ./keys:/app/keys
     environment:
-      - APP_ENV=test # Set the environment to "test"
+      - APP_ENV=development
+      - LOG_LEVEL=debug
       - VALIDATION_SERVICE_URL=http://localhost:8080
       - GITHUB_APP_ID=${GITHUB_APP_ID}
       - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
-      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-dummysecret}
       - GITHUB_ENTERPRISE_HOST=${GITHUB_ENTERPRISE_HOST:-}
-      - GITHUB_ENTERPRISE_APP_ID=${GITHUB_ENTERPRISE_APP_ID:-}
-      - GITHUB_ENTERPRISE_INSTALLATION_ID=${GITHUB_ENTERPRISE_INSTALLATION_ID:-}
-      - GITHUB_ENTERPRISE_WEBHOOK_SECRET=${GITHUB_ENTERPRISE_WEBHOOK_SECRET:-}
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=secretsuser
+      - DB_PASSWORD=secretspass
+      - DB_NAME=secretsdb
     depends_on:
       - validation-service
+      - postgres
     networks:
       - secret-validator-network
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=secretsuser
+      - POSTGRES_PASSWORD=secretspass
+      - POSTGRES_DB=secretsdb
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - secret-validator-network
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - postgres
+    networks:
+      - secret-validator-network
+
+volumes:
+  postgres_data:
+  grafana_data:
 
 networks:
   secret-validator-network:
