@@ -6,10 +6,12 @@ services:
       context: .
       dockerfile: Dockerfile.validator
     volumes:
-      - ./config:/app/config
+      - ./config.json:/app/config.json
       - ./logs:/var/log/secret-validator
     environment:
-      - VALIDATION_SERVICE_URL=http://localhost:8080
+      - VALIDATION_SERVICE_URL=http://validation-service:8080
+    depends_on:
+      - validation-service
     networks:
       - secret-validator-network
 
@@ -22,6 +24,29 @@ services:
     environment:
       - GIN_MODE=release
       - PORT=8080
+    networks:
+      - secret-validator-network
+
+  github-app:
+    build:
+      context: .
+      dockerfile: Dockerfile.app
+    ports:
+      - "3000:8080"
+    volumes:
+      - ./config.json:/app/config.json
+      - ./keys:/app/keys
+    environment:
+      - VALIDATION_SERVICE_URL=http://localhost:8080
+      - GITHUB_APP_ID=${GITHUB_APP_ID}
+      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
+      - GITHUB_ENTERPRISE_HOST=${GITHUB_ENTERPRISE_HOST:-}
+      - GITHUB_ENTERPRISE_APP_ID=${GITHUB_ENTERPRISE_APP_ID:-}
+      - GITHUB_ENTERPRISE_INSTALLATION_ID=${GITHUB_ENTERPRISE_INSTALLATION_ID:-}
+      - GITHUB_ENTERPRISE_WEBHOOK_SECRET=${GITHUB_ENTERPRISE_WEBHOOK_SECRET:-}
+    depends_on:
+      - validation-service
     networks:
       - secret-validator-network
 
