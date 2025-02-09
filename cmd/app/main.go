@@ -280,7 +280,7 @@ func main() {
 	app := NewSecretDetectorApp("http://validation-service:8080", logger)
 
 	// Load private key from file
-	privateKey, err := os.ReadFile("path/to/private-key.pem")
+	privateKey, err := os.ReadFile("/app/keys/github.pem")
 	if err != nil {
 		logger.Fatalf("Failed to read private key: %v", err)
 	}
@@ -299,7 +299,7 @@ func main() {
 
 	// Add Enterprise instance (optional)
 	if os.Getenv("GITHUB_ENTERPRISE_HOST") != "" {
-		enterpriseKey, err := os.ReadFile("path/to/enterprise-key.pem")
+		enterpriseKey, err := os.ReadFile("/app/keys/enterprise.pem")
 		if err != nil {
 			logger.Fatalf("Failed to read enterprise key: %v", err)
 		}
