@@ -1,140 +1,204 @@
 # Secrets Detector
 
-A GitHub Enterprise pre-receive hook application that detects and validates potential secrets in code commits.
+A GitHub App that detects and blocks commits containing secrets, sensitive information, and credentials. Works with both GitHub.com and GitHub Enterprise.
 
 ## Features
 
-- Detects various types of secrets using configurable regex patterns
-- Validates detected secrets through a dedicated validation service
+- Detects various types of secrets (AWS keys, certificates, API tokens, etc.)
+- Validates authenticity of detected secrets
 - Blocks commits containing valid secrets
-- Supports custom validation rules and patterns
-- Configurable notifications via email and Slack
-- Docker-based deployment
+- Works with both GitHub.com and GitHub Enterprise
+- Supports multiple GitHub instances simultaneously
+- Real-time feedback via GitHub status checks
 
-## Installation and Setup
+## Prerequisites
 
-### 1. Build and Run using Docker Compose
+- Go 1.21 or higher
+- Docker and Docker Compose
+- GitHub App credentials
+- GitHub Enterprise (optional)
 
-Build the images:
+## Installation
+
+1. Clone the repository:
 ```bash
-docker-compose build
+git clone https://github.com/your-org/secrets-detector
+cd secrets-detector
 ```
 
-Start the services:
+2. Install dependencies:
+```bash
+go mod download
+```
+
+3. Create configuration:
+```bash
+# Copy example config
+cp config.example.json config.json
+
+# Edit with your settings
+vim config.json
+```
+
+## Configuration
+
+### GitHub.com Setup
+
+1. Create a GitHub App:
+   - Go to GitHub Settings > Developer Settings > GitHub Apps
+   - Create New GitHub App
+   - Set permissions:
+     - Repository contents: Read
+     - Pull requests: Read & Write
+     - Commit statuses: Read & Write
+   - Generate and download private key
+   - Note your App ID and Installation ID
+
+2. Configure environment variables:
+```bash
+export GITHUB_APP_ID=your_app_id
+export GITHUB_INSTALLATION_ID=your_installation_id
+export GITHUB_WEBHOOK_SECRET=your_webhook_secret
+```
+
+3. Place your private key:
+```bash
+cp /path/to/downloaded/private-key.pem private-key.pem
+```
+
+### GitHub Enterprise Setup
+
+1. Create Enterprise GitHub App:
+   - Access your GitHub Enterprise instance
+   - Follow same steps as GitHub.com app creation
+   - Note Enterprise-specific credentials
+
+2. Configure Enterprise environment:
+```bash
+export GITHUB_ENTERPRISE_HOST=github.your-company.com
+export GITHUB_ENTERPRISE_APP_ID=your_enterprise_app_id
+export GITHUB_ENTERPRISE_INSTALLATION_ID=your_enterprise_installation_id
+export GITHUB_ENTERPRISE_WEBHOOK_SECRET=your_enterprise_webhook_secret
+```
+
+## Running Locally
+
+1. Start the services:
 ```bash
 docker-compose up -d
 ```
 
-### 2. GitHub Enterprise Integration
-
-Configure the pre-receive hook on your GitHub Enterprise server:
-```bash
-docker cp secret-validator:/app/secret-validator /github/data/git-hooks/pre-receive.d/
-chmod +x /github/data/git-hooks/pre-receive.d/secret-validator
-```
-
-### 3. Configuration
-
-Create a `config.json` file with your settings:
-```json
-{
-    "patterns": {
-        "aws_key": "AKIA[0-9A-Z]{16}",
-        "private_key": "-----BEGIN\\s*(?:RSA|DSA|EC|OPENSSH|PRIVATE)\\s*KEY-----",
-        "certificate": "-----BEGIN\\s*CERTIFICATE-----",
-        "github_token": "gh[pos]_[0-9a-zA-Z]{36}"
-    },
-    "api": {
-        "validate_endpoint": "http://validation-service:8080/validate",
-        "token": "your-auth-token-here"
-    }
-}
-```
-
-### 4. Environment Variables
-
-Required environment variables:
-- `VALIDATION_SERVICE_URL`: URL of the validation service
-- `GIN_MODE`: Gin framework mode (development/release)
-- `PORT`: Port for the validation service
-
-## Testing
-
-### Local Testing
-
-View logs:
-```bash
-docker-compose logs -f
-```
-
-Test the validation service:
+2. Test the validation service:
 ```bash
 curl -X POST http://localhost:8080/validate \
   -H "Content-Type: application/json" \
   -d '{
     "secret": {
-      "type": "certificate",
-      "value": "-----BEGIN CERTIFICATE-----..."
+      "type": "aws_key",
+      "value": "AKIAIOSFODNN7EXAMPLE"
     }
   }'
 ```
 
-To run the tests:
+3. Test webhook handling:
+```bash
+# GitHub.com webhook
+curl -X POST http://localhost:8080/webhook \
+  -H "X-GitHub-Event: push" \
+  -H "X-Hub-Signature: sha1=..." \
+  -d @test/fixtures/push-event.json
+
+# Enterprise webhook
+curl -X POST http://localhost:8080/webhook \
+  -H "X-GitHub-Event: push" \
+  -H "X-GitHub-Enterprise-Host: github.your-company.com" \
+  -H "X-Hub-Signature: sha1=..." \
+  -d @test/fixtures/push-event.json
 ```
-# Run all tests
+
+## Testing
+
+Run the test suite:
+```bash
 go test ./...
-
-# Run tests with coverage
-go test ./... -cover
-
-# Run specific test
-go test ./cmd/validator -run TestValidateContent
-
-# Run tests with verbose output
-go test -v ./...
 ```
 
-### Validation Rules
-
-The service validates several types of secrets:
-- SSL/TLS Certificates
-- Private Keys (RSA, DSA, EC)
-- API Keys
-- Authentication Tokens
-
-## Security Considerations
-
-- The validator container requires git command access
-- The validation service runs on port 8080
-- Services communicate over a dedicated Docker network
-- Configuration and logs are managed through Docker volumes
-- Multi-stage builds are used to minimize image size
-
-## Scaling
-
-To scale the application:
-- Add a load balancer for the validation service
-- Deploy using Docker Swarm or Kubernetes
-- Implement health checks
-- Add monitoring and alerting
-
-## Project Structure
-
+Run with coverage:
+```bash
+go test -cover ./...
 ```
-secrets-detector/
-├── Dockerfile.validator
-├── Dockerfile.service
-├── docker-compose.yml
-├── main.go
-├── validation_service.go
-├── go.mod
-├── go.sum
-└── config/
-    └── config.json
+
+## Production Deployment
+
+1. Build the containers:
+```bash
+docker-compose build
 ```
+
+2. Deploy using your preferred method:
+```bash
+# Example: Push to registry
+docker-compose push
+
+# Example: Deploy to Kubernetes
+kubectl apply -f k8s/
+```
+
+3. Configure webhooks in GitHub:
+   - Set Webhook URL to your deployed instance
+   - Configure secret
+   - Select events (push, pull request)
 
 ## Contributing
 
+### Development Process
+
 1. Fork the repository
 2. Create a feature branch
-3. Make your c
+```bash
+git checkout -b feature/your-feature-name
+```
+
+3. Make your changes:
+   - Follow Go best practices
+   - Add tests for new functionality
+   - Update documentation
+   - Run linter: `golangci-lint run`
+
+4. Commit your changes:
+```bash
+git add .
+git commit -m "feat: add your feature"
+```
+
+5. Push and create a Pull Request
+```bash
+git push origin feature/your-feature-name
+```
+
+### Code Style
+
+- Follow standard Go conventions
+- Use meaningful variable names
+- Add comments for complex logic
+- Write unit tests for new code
+
+### Pull Request Process
+
+1. Update the README.md if needed
+2. Update the version numbers if applicable
+3. Get review from at least one maintainer
+4. PRs are merged after passing:
+   - CI checks
+   - Code review
+   - Test coverage requirements
+
+## Support
+
+- Create an issue for bugs
+- Discussions for general questions
+- Security issues: Contact maintainers directly
+
+## License
+
+[Your License Here]
