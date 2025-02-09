@@ -40,7 +40,7 @@ type SecretDetectorApp struct {
 
 func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger) *SecretDetectorApp {
 	if logger == nil {
-		logger = log.New(os.Stdout, "[SecretDetector] ", log.LstdFlags)
+		logger = log.New(os.Stdout, "[SecretDetector] ", log.LstdFlags|log.Lshortfile)
 	}
 	return &SecretDetectorApp{
 		configs: make(map[string]*GitHubConfig),
@@ -149,7 +149,16 @@ func (app *SecretDetectorApp) validateContent(ctx context.Context, content strin
 	return response.Findings, nil
 }
 
-func (app *SecretDetectorApp) getDiff(ctx context.Context, client *github.Client, repo *github.Repository, base, head string) (string, error) {
+func (app *SecretDetectorApp) getTestDiff(ctx context.Context, client *github.Client,
+	repo *github.Repository, base, head string) (string, error) {
+	return `diff --git a/config.txt b/config.txt
++AWS_KEY=AKIAIOSFODNN7EXAMPLE
++password=secret123
++API_KEY=test_key`, nil
+}
+
+func (app *SecretDetectorApp) getDiff(ctx context.Context, client *github.Client,
+	repo *github.Repository, base, head string) (string, error) {
 	comparison, _, err := client.Repositories.CompareCommits(
 		ctx,
 		repo.GetOwner().GetLogin(),
@@ -171,7 +180,9 @@ func (app *SecretDetectorApp) getDiff(ctx context.Context, client *github.Client
 	return diff, nil
 }
 
-func (app *SecretDetectorApp) createStatus(ctx context.Context, client *github.Client, repo *github.Repository, commit string, findings []models.SecretFinding) error {
+func (app *SecretDetectorApp) createStatus(ctx context.Context, client *github.Client,
+	repo *github.Repository, commit string, findings []models.SecretFinding) error {
+
 	var description string
 	state := "success"
 
@@ -207,12 +218,15 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 	head := event.GetAfter()
 	repo := event.GetRepo()
 
-	fullRepo := &github.Repository{
-		Owner: &github.User{Login: github.String(repo.GetOwner().GetName())},
-		Name:  github.String(repo.GetName()),
+	var diff string
+	var err error
+
+	if os.Getenv("APP_ENV") == "test" {
+		diff, err = app.getTestDiff(ctx, client, &github.Repository{Owner: repo.Owner, Name: repo.Name}, base, head)
+	} else {
+		diff, err = app.getDiff(ctx, client, &github.Repository{Owner: repo.Owner, Name: repo.Name}, base, head)
 	}
 
-	diff, err := app.getDiff(ctx, client, fullRepo, base, head)
 	if err != nil {
 		return fmt.Errorf("failed to get diff: %v", err)
 	}
@@ -222,7 +236,15 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 		return fmt.Errorf("failed to validate content: %v", err)
 	}
 
-	if err := app.createStatus(ctx, client, fullRepo, head, findings); err != nil {
+	if os.Getenv("APP_ENV") == "test" {
+		app.logger.Printf("Test mode - Found %d secrets", len(findings))
+		for _, finding := range findings {
+			app.logger.Printf("Found secret: %s", finding.Type)
+		}
+		return nil
+	}
+
+	if err := app.createStatus(ctx, client, &github.Repository{Owner: repo.Owner, Name: repo.Name}, head, findings); err != nil {
 		return fmt.Errorf("failed to create status: %v", err)
 	}
 
@@ -279,7 +301,7 @@ func main() {
 	logger := log.New(os.Stdout, "[SecretDetector] ", log.LstdFlags|log.Lshortfile)
 	app := NewSecretDetectorApp("http://validation-service:8080", logger)
 
-	// Load private key from file
+	// Load GitHub.com private key
 	privateKey, err := os.ReadFile("/app/keys/github.pem")
 	if err != nil {
 		logger.Fatalf("Failed to read private key: %v", err)
@@ -288,8 +310,8 @@ func main() {
 	// Add GitHub.com instance
 	err = app.AddInstance(&GitHubConfig{
 		IsEnterprise:   false,
-		AppID:          12345, // Replace with your App ID
-		InstallationID: 67890, // Replace with your Installation ID
+		AppID:          12345,
+		InstallationID: 67890,
 		PrivateKey:     string(privateKey),
 		WebhookSecret:  os.Getenv("GITHUB_WEBHOOK_SECRET"),
 	})
@@ -297,7 +319,7 @@ func main() {
 		logger.Fatalf("Failed to add GitHub.com instance: %v", err)
 	}
 
-	// Add Enterprise instance (optional)
+	// Add Enterprise instance if configured
 	if os.Getenv("GITHUB_ENTERPRISE_HOST") != "" {
 		enterpriseKey, err := os.ReadFile("/app/keys/enterprise.pem")
 		if err != nil {

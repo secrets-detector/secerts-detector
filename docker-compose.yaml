@@ -37,6 +37,7 @@ services:
       - ./config.json:/app/config.json
       - ./keys:/app/keys
     environment:
+      - APP_ENV=test # Set the environment to "test"
       - VALIDATION_SERVICE_URL=http://localhost:8080
       - GITHUB_APP_ID=${GITHUB_APP_ID}
       - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
