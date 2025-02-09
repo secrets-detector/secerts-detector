@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
+	"strings"
 	"time"
 
 	"secrets-detector/pkg/models"
@@ -36,12 +38,19 @@ type SecretDetectorApp struct {
 	clients    map[string]*github.Client
 	valService ValidationServiceConfig
 	logger     *log.Logger
+	patterns   map[string]*regexp.Regexp
 }
 
 func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger) *SecretDetectorApp {
 	if logger == nil {
 		logger = log.New(os.Stdout, "[SecretDetector] ", log.LstdFlags|log.Lshortfile)
 	}
+
+	patterns, err := loadPatterns("/app/config/config.json")
+	if err != nil {
+		logger.Printf("Warning: Failed to load patterns: %v", err)
+	}
+
 	return &SecretDetectorApp{
 		configs: make(map[string]*GitHubConfig),
 		clients: make(map[string]*github.Client),
@@ -49,8 +58,44 @@ func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger) *Secret
 			Endpoint: validationEndpoint,
 			Timeout:  30 * time.Second,
 		},
-		logger: logger,
+		logger:   logger,
+		patterns: patterns,
 	}
+}
+
+func loadPatterns(configPath string) (map[string]*regexp.Regexp, error) {
+	log.Printf("Attempting to load patterns from: %s", configPath)
+
+	configFile, err := os.ReadFile(configPath)
+	if err != nil {
+		log.Printf("Error reading config file: %v", err)
+		return nil, fmt.Errorf("failed to read config file: %v", err)
+	}
+
+	log.Printf("Config file content: %s", string(configFile))
+
+	var config struct {
+		Patterns map[string]string `json:"patterns"`
+	}
+	if err := json.Unmarshal(configFile, &config); err != nil {
+		log.Printf("Error unmarshaling config: %v", err)
+		return nil, fmt.Errorf("failed to unmarshal config: %v", err)
+	}
+
+	log.Printf("Loaded patterns: %+v", config.Patterns)
+
+	patterns := make(map[string]*regexp.Regexp)
+	for name, pattern := range config.Patterns {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			log.Printf("Error compiling pattern %s: %v", name, err)
+			return nil, fmt.Errorf("failed to compile pattern %s: %v", name, err)
+		}
+		patterns[name] = re
+		log.Printf("Successfully compiled pattern: %s", name)
+	}
+
+	return patterns, nil
 }
 
 func (app *SecretDetectorApp) AddInstance(config *GitHubConfig) error {
@@ -149,14 +194,6 @@ func (app *SecretDetectorApp) validateContent(ctx context.Context, content strin
 	return response.Findings, nil
 }
 
-func (app *SecretDetectorApp) getTestDiff(ctx context.Context, client *github.Client,
-	repo *github.Repository, base, head string) (string, error) {
-	return `diff --git a/config.txt b/config.txt
-+AWS_KEY=AKIAIOSFODNN7EXAMPLE
-+password=secret123
-+API_KEY=test_key`, nil
-}
-
 func (app *SecretDetectorApp) getDiff(ctx context.Context, client *github.Client,
 	repo *github.Repository, base, head string) (string, error) {
 	comparison, _, err := client.Repositories.CompareCommits(
@@ -218,15 +255,7 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 	head := event.GetAfter()
 	repo := event.GetRepo()
 
-	var diff string
-	var err error
-
-	if os.Getenv("APP_ENV") == "test" {
-		diff, err = app.getTestDiff(ctx, client, &github.Repository{Owner: repo.Owner, Name: repo.Name}, base, head)
-	} else {
-		diff, err = app.getDiff(ctx, client, &github.Repository{Owner: repo.Owner, Name: repo.Name}, base, head)
-	}
-
+	diff, err := app.getDiff(ctx, client, &github.Repository{Owner: repo.Owner, Name: repo.Name}, base, head)
 	if err != nil {
 		return fmt.Errorf("failed to get diff: %v", err)
 	}
@@ -236,20 +265,13 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 		return fmt.Errorf("failed to validate content: %v", err)
 	}
 
-	if os.Getenv("APP_ENV") == "test" {
-		app.logger.Printf("Test mode - Found %d secrets", len(findings))
-		for _, finding := range findings {
-			app.logger.Printf("Found secret: %s", finding.Type)
-		}
-		return nil
-	}
-
 	if err := app.createStatus(ctx, client, &github.Repository{Owner: repo.Owner, Name: repo.Name}, head, findings); err != nil {
 		return fmt.Errorf("failed to create status: %v", err)
 	}
 
 	return nil
 }
+
 func (app *SecretDetectorApp) HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -297,9 +319,121 @@ func (app *SecretDetectorApp) HandleWebhook(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusOK)
 }
 
+func (app *SecretDetectorApp) HandleValidate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	app.logger.Printf("Number of loaded patterns: %d", len(app.patterns))
+	for patternType := range app.patterns {
+		app.logger.Printf("Available pattern: %s", patternType)
+	}
+
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		app.logger.Printf("Error decoding request: %v", err)
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	app.logger.Printf("Received content to validate: %s", req.Content)
+
+	// Find first matching secret in the content
+	var firstFinding *models.SecretFinding
+	lines := strings.Split(req.Content, "\n")
+
+	for lineNum, line := range lines {
+		app.logger.Printf("Checking line %d: %s", lineNum+1, line)
+		for secretType, pattern := range app.patterns {
+			app.logger.Printf("Testing pattern %s against line", secretType)
+			if matches := pattern.FindStringIndex(line); matches != nil {
+				app.logger.Printf("Found match with pattern %s!", secretType)
+				firstFinding = &models.SecretFinding{
+					Type:     secretType,
+					Value:    line[matches[0]:matches[1]],
+					StartPos: matches[0],
+					EndPos:   matches[1],
+				}
+				break
+			}
+		}
+		if firstFinding != nil {
+			break
+		}
+	}
+
+	if firstFinding == nil {
+		app.logger.Printf("No secrets found in content")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(models.ValidationResponse{
+			IsValid: true,
+			Message: "No secrets detected",
+		})
+		return
+	}
+
+	app.logger.Printf("Found secret of type: %s", firstFinding.Type)
+
+	// Send to validation service
+	validationReq := models.ValidationRequest{
+		Secret: *firstFinding,
+	}
+
+	jsonBody, err := json.Marshal(validationReq)
+	if err != nil {
+		app.logger.Printf("Error marshaling validation request: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	app.logger.Printf("Sending to validation service: %s", string(jsonBody))
+
+	client := &http.Client{
+		Timeout: app.valService.Timeout,
+	}
+
+	validationResp, err := http.NewRequest("POST", app.valService.Endpoint+"/validate", bytes.NewBuffer(jsonBody))
+	if err != nil {
+		app.logger.Printf("Error creating validation request: %v", err)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+	validationResp.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(validationResp)
+	if err != nil {
+		app.logger.Printf("Error calling validation service: %v", err)
+		http.Error(w, "Validation service error", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	var response models.ValidationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		app.logger.Printf("Error decoding validation response: %v", err)
+		http.Error(w, "Failed to parse validation response", http.StatusInternalServerError)
+		return
+	}
+
+	app.logger.Printf("Received response from validation service: %+v", response)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func getMessage(findings []models.SecretFinding) string {
+	if len(findings) == 0 {
+		return "No secrets detected"
+	}
+	return fmt.Sprintf("Found %d potential secrets", len(findings))
+}
+
 func main() {
 	logger := log.New(os.Stdout, "[SecretDetector] ", log.LstdFlags|log.Lshortfile)
-	app := NewSecretDetectorApp("http://validation-service:8080", logger)
+	app := NewSecretDetectorApp("http://localhost:8080", logger)
 
 	// Load GitHub.com private key
 	privateKey, err := os.ReadFile("/app/keys/github.pem")
@@ -340,6 +474,8 @@ func main() {
 	}
 
 	http.HandleFunc("/webhook", app.HandleWebhook)
+	http.HandleFunc("/validate", app.HandleValidate)
+
 	logger.Printf("Starting server on :8080")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		logger.Fatalf("Server failed: %v", err)

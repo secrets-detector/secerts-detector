@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Test payload
+# Test payload with content that includes secrets
 PAYLOAD='{
     "ref": "refs/heads/main",
     "before": "6113728f27ae82c7b1a177c8d03f9e96e0adf246",
@@ -11,16 +11,25 @@ PAYLOAD='{
         "owner": {
             "login": "owner"
         }
-    }
+    },
+    "commits": [
+        {
+            "id": "6113728f27ae82c7b1a177c8d03f9e96e0adf247",
+            "message": "add config",
+            "added": ["config.txt"],
+            "modified": [],
+            "removed": []
+        }
+    ]
 }'
 
 # Generate signature using webhook secret from .env
 source .env
 SIGNATURE=$(echo -n "$PAYLOAD" | openssl sha1 -hmac "$GITHUB_WEBHOOK_SECRET" | sed 's/^.* //')
 
-# Create curl command
-echo "curl -X POST http://localhost:3000/webhook \\"
-echo "  -H \"Content-Type: application/json\" \\"
-echo "  -H \"X-GitHub-Event: push\" \\"
-echo "  -H \"X-Hub-Signature: sha1=$SIGNATURE\" \\"
-echo "  -d '$PAYLOAD'"
+# Make the request
+curl -X POST http://localhost:3000/webhook \
+  -H "Content-Type: application/json" \
+  -H "X-GitHub-Event: push" \
+  -H "X-Hub-Signature: sha1=$SIGNATURE" \
+  -d "$PAYLOAD"

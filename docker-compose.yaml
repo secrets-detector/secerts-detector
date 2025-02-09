@@ -6,7 +6,7 @@ services:
       context: .
       dockerfile: Dockerfile.validator
     volumes:
-      - ./config.json:/app/config.json
+      - ./config/config.json:/app/config/config.json
       - ./logs:/var/log/secret-validator
     environment:
       - VALIDATION_SERVICE_URL=http://validation-service:8080
@@ -34,7 +34,7 @@ services:
     ports:
       - "3000:8080"
     volumes:
-      - ./config.json:/app/config.json
+      - ./config/config.json:/app/config/config.json
       - ./keys:/app/keys
     environment:
       - APP_ENV=test # Set the environment to "test"
