@@ -22,7 +22,7 @@ WORKDIR /app
 
 # Copy the binary from builder
 COPY --from=builder /app/github-app .
-COPY config.json .
+COPY config/config.json .
 
 # Create directory for keys
 RUN mkdir -p /app/keys
