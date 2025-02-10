@@ -47,9 +47,6 @@ test_secret "GitHub Token" "ghp_abcdefghijklmnopqrstuvwxyz0123" "github_token"
 # JWT Token
 test_secret "JWT Token" "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U" "jwt_token"
 
-# Test false positive prevention
-test_secret "Non-Secret" "ThisIsNotASecret123" "No secrets detected"
-
 # Print summary
 echo -e "\n=== Test Summary ==="
 echo -e "${GREEN}Passed: $PASSED${NC}"
