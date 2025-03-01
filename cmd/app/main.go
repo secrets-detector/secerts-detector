@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -408,14 +411,63 @@ func (app *SecretDetectorApp) HandleWebhook(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	payload, err := github.ValidatePayload(r, []byte(config.WebhookSecret))
+	// Debug logging to troubleshoot signature validation
+	app.logger.Printf("Received webhook with signature: %s", r.Header.Get("X-Hub-Signature"))
+
+	// Read the request body
+	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		app.logger.Printf("Invalid webhook payload: %v", err)
-		http.Error(w, "Invalid webhook payload", http.StatusBadRequest)
+		app.logger.Printf("Error reading request body: %v", err)
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
 
-	event, err := github.ParseWebHook(github.WebHookType(r), payload)
+	// Restore the body for later use
+	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+	// Log the first 100 bytes of the payload for debugging
+	payloadPrefix := string(bodyBytes)
+	if len(payloadPrefix) > 100 {
+		payloadPrefix = payloadPrefix[:100] + "..."
+	}
+	app.logger.Printf("Received payload (first 100 bytes): %s", payloadPrefix)
+
+	// Calculate signature manually to compare with received signature
+	mac := hmac.New(sha1.New, []byte(config.WebhookSecret))
+	mac.Write(bodyBytes)
+	expectedSig := "sha1=" + hex.EncodeToString(mac.Sum(nil))
+
+	// Get the signature from the request
+	receivedSig := r.Header.Get("X-Hub-Signature")
+
+	// Log both signatures for comparison
+	app.logger.Printf("Expected signature: %s", expectedSig)
+	app.logger.Printf("Received signature: %s", receivedSig)
+
+	// Do a manual signature comparison
+	signatureIsValid := hmac.Equal(
+		[]byte(expectedSig),
+		[]byte(receivedSig),
+	)
+
+	// If manual validation passes, proceed; otherwise use the library method
+	if signatureIsValid {
+		app.logger.Printf("Manual signature validation successful")
+	} else {
+		// Try the library method as backup
+		_, err = github.ValidatePayload(r, []byte(config.WebhookSecret))
+		if err != nil {
+			app.logger.Printf("Signature validation failed: %v", err)
+			http.Error(w, "Invalid webhook payload", http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Restore the body again after validation
+	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+	// Parse the webhook event
+	event, err := github.ParseWebHook(github.WebHookType(r), bodyBytes)
 	if err != nil {
 		app.logger.Printf("Failed to parse webhook: %v", err)
 		http.Error(w, "Failed to parse webhook", http.StatusBadRequest)
