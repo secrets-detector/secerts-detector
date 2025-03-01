@@ -41,7 +41,7 @@ type SecretDetectorApp struct {
 	valService ValidationServiceConfig
 	logger     *log.Logger
 	patterns   map[string]*regexp.Regexp
-	db         *db.DB // New database field
+	db         *db.DB // Database field
 }
 
 func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger) *SecretDetectorApp {
@@ -87,8 +87,6 @@ func loadPatterns(configPath string) (map[string]*regexp.Regexp, error) {
 		log.Printf("Error reading config file: %v", err)
 		return nil, fmt.Errorf("failed to read config file: %v", err)
 	}
-
-	log.Printf("Config file content: %s", string(configFile))
 
 	var config struct {
 		Patterns map[string]string `json:"patterns"`
@@ -239,9 +237,23 @@ func (app *SecretDetectorApp) createStatus(ctx context.Context, client *github.C
 	var description string
 	state := "success"
 
-	if len(findings) > 0 {
+	// Check if any valid secrets were found
+	validSecrets := false
+	secretCount := 0
+
+	for _, finding := range findings {
+		if finding.IsValid {
+			validSecrets = true
+			secretCount++
+		}
+	}
+
+	if validSecrets {
 		state = "failure"
-		description = fmt.Sprintf("Found %d potential secrets", len(findings))
+		description = fmt.Sprintf("Blocked: Found %d valid secrets (certificate/key)", secretCount)
+	} else if len(findings) > 0 {
+		// Findings exist but none are valid (test data, etc.)
+		description = fmt.Sprintf("No valid secrets detected (%d invalid/test secrets found)", len(findings))
 	} else {
 		description = "No secrets detected"
 	}
@@ -301,7 +313,62 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 		Name:  github.String(repo.GetName()),
 	}
 
-	// Add missing return statement
+	// Log findings to database
+	if len(findings) > 0 {
+		for _, finding := range findings {
+			// Only block if the secret is valid
+			if finding.IsValid {
+				app.logger.Printf("BLOCKING: Found valid %s in commit", finding.Type)
+
+				// Log to database
+				repoModel := &models.Repository{
+					Name: *repository.Name,
+					Owner: &models.Owner{
+						Login: *repository.Owner.Login,
+						Type:  "User", // Default to user, could be overridden if known
+					},
+				}
+
+				err := app.db.RecordDetection(
+					ctx,
+					repoModel,
+					finding,
+					head,
+				)
+
+				if err != nil {
+					app.logger.Printf("Error recording detection: %v", err)
+				}
+			} else {
+				app.logger.Printf("ALLOWING: Found invalid/test %s in commit", finding.Type)
+
+				// Log to database with is_blocked=false
+				repoModel := &models.Repository{
+					Name: *repository.Name,
+					Owner: &models.Owner{
+						Login: *repository.Owner.Login,
+						Type:  "User", // Default to user, could be overridden if known
+					},
+				}
+
+				// Mark as not blocked since it's invalid/test data
+				finding.Message += " (Commit allowed - not blocked)"
+
+				err := app.db.RecordDetection(
+					ctx,
+					repoModel,
+					finding,
+					head,
+				)
+
+				if err != nil {
+					app.logger.Printf("Error recording detection: %v", err)
+				}
+			}
+		}
+	}
+
+	// Create GitHub status based on findings
 	return app.createStatus(ctx, client, repository, head, findings)
 }
 
@@ -351,15 +418,11 @@ func (app *SecretDetectorApp) HandleWebhook(w http.ResponseWriter, r *http.Reque
 
 	w.WriteHeader(http.StatusOK)
 }
+
 func (app *SecretDetectorApp) HandleValidate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
-	}
-
-	app.logger.Printf("Number of loaded patterns: %d", len(app.patterns))
-	for patternType := range app.patterns {
-		app.logger.Printf("Available pattern: %s", patternType)
 	}
 
 	var req struct {
@@ -372,25 +435,54 @@ func (app *SecretDetectorApp) HandleValidate(w http.ResponseWriter, r *http.Requ
 	}
 
 	app.logger.Printf("Received content to validate. Length: %d", len(req.Content))
-	app.logger.Printf("Content preview: %s", truncateString(req.Content, 100))
 
 	// Handle empty content
 	if strings.TrimSpace(req.Content) == "" {
 		app.logger.Printf("Empty content received")
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(models.ValidationResponse{
-			IsValid: true,
-			Message: "No content to validate",
+		json.NewEncoder(w).Encode(models.DetectionResponse{
+			Findings: []models.SecretFinding{},
+			Message:  "No content to validate",
 		})
 		return
 	}
+
+	// Validate the content using validation service
+	findings, err := app.validateContent(r.Context(), req.Content)
+	if err != nil {
+		app.logger.Printf("Error validating content: %v", err)
+		http.Error(w, fmt.Sprintf("Error validating content: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Generate appropriate message
+	message := app.getMessage(findings)
+
+	// Return the findings
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(models.DetectionResponse{
+		Findings: findings,
+		Message:  message,
+	})
 }
 
 func (app *SecretDetectorApp) getMessage(findings []models.SecretFinding) string {
 	if len(findings) == 0 {
 		return "No secrets detected"
 	}
-	return fmt.Sprintf("Found %d potential secrets", len(findings))
+
+	validCount := 0
+	for _, finding := range findings {
+		if finding.IsValid {
+			validCount++
+		}
+	}
+
+	if validCount > 0 {
+		return fmt.Sprintf("Found %d valid secrets that would be blocked", validCount)
+	}
+
+	return fmt.Sprintf("Found %d potential secrets, but none are valid or they are test data", len(findings))
 }
 
 func truncateString(s string, n int) string {
@@ -400,9 +492,26 @@ func truncateString(s string, n int) string {
 	return s[:n] + "..."
 }
 
+// Helper function to get int64 from environment with default
+func getEnvInt64(key string, defaultVal int64) int64 {
+	if val := os.Getenv(key); val != "" {
+		if intVal, err := strconv.ParseInt(val, 10, 64); err == nil {
+			return intVal
+		}
+	}
+	return defaultVal
+}
+
 func main() {
 	logger := log.New(os.Stdout, "[SecretDetector] ", log.LstdFlags|log.Lshortfile)
-	app := NewSecretDetectorApp("http://validation-service:8080", logger)
+
+	// Get validation service URL from environment or use default
+	validationServiceURL := os.Getenv("VALIDATION_SERVICE_URL")
+	if validationServiceURL == "" {
+		validationServiceURL = "http://validation-service:8080"
+	}
+
+	app := NewSecretDetectorApp(validationServiceURL, logger)
 
 	// Load GitHub.com private key
 	privateKey, err := os.ReadFile("/app/keys/github.pem")
@@ -464,18 +573,9 @@ func main() {
 	http.HandleFunc("/webhook", app.HandleWebhook)
 	http.HandleFunc("/validate", app.HandleValidate)
 
-	logger.Printf("Starting server on :8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	listenAddr := ":8080"
+	logger.Printf("Starting server on %s", listenAddr)
+	if err := http.ListenAndServe(listenAddr, nil); err != nil {
 		logger.Fatalf("Server failed: %v", err)
 	}
-}
-
-// Helper function to get int64 from environment with default
-func getEnvInt64(key string, defaultVal int64) int64 {
-	if val := os.Getenv(key); val != "" {
-		if intVal, err := strconv.ParseInt(val, 10, 64); err == nil {
-			return intVal
-		}
-	}
-	return defaultVal
 }

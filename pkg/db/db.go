@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"secrets-detector/pkg/models"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 
 type DB struct {
 	*sql.DB
+	logger *log.Logger
 }
 
 func NewDB(host, port, user, password, dbname string) (*DB, error) {
@@ -30,7 +32,10 @@ func NewDB(host, port, user, password, dbname string) (*DB, error) {
 		return nil, fmt.Errorf("error connecting to the database: %v", err)
 	}
 
-	return &DB{db}, nil
+	logger := log.New(log.Writer(), "[DB] ", log.LstdFlags)
+	logger.Printf("Successfully connected to PostgreSQL database")
+
+	return &DB{db, logger}, nil
 }
 
 func (db *DB) RecordDetection(ctx context.Context, repo *models.Repository, finding models.SecretFinding, commit string) error {
@@ -39,6 +44,8 @@ func (db *DB) RecordDetection(ctx context.Context, repo *models.Repository, find
 		return fmt.Errorf("error starting transaction: %v", err)
 	}
 	defer tx.Rollback()
+
+	db.logger.Printf("Recording detection for repo %s/%s, secret type: %s", repo.Owner.Login, repo.Name, finding.Type)
 
 	// Get or create repository
 	var repoID int
@@ -53,18 +60,38 @@ func (db *DB) RecordDetection(ctx context.Context, repo *models.Repository, find
 		return fmt.Errorf("error upserting repository: %v", err)
 	}
 
+	// Determine if we should block based on IsValid field
+	isBlocked := finding.IsValid
+
 	// Record detection
-	_, err = tx.ExecContext(ctx,
+	var detectionID int
+	err = tx.QueryRowContext(ctx,
 		`INSERT INTO secret_detections 
          (repository_id, commit_hash, secret_type, secret_location, 
-          line_number, is_blocked, validation_status, branch_name, author)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          line_number, is_blocked, validation_status, branch_name, author, commit_timestamp, detected_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         RETURNING id`,
 		repoID, commit, finding.Type, finding.FilePath,
-		finding.StartPos, true, "DETECTED", "main", "author",
-	)
+		finding.StartPos, isBlocked,
+		map[bool]string{true: "VALID", false: "INVALID"}[finding.IsValid],
+		"main", "unknown", time.Now(), time.Now(),
+	).Scan(&detectionID)
 	if err != nil {
 		return fmt.Errorf("error inserting detection: %v", err)
 	}
+
+	// Record validation history
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO validation_history 
+         (detection_id, validation_result, validation_message, validated_at)
+         VALUES ($1, $2, $3, $4)`,
+		detectionID, finding.IsValid, finding.Message, time.Now(),
+	)
+	if err != nil {
+		return fmt.Errorf("error inserting validation history: %v", err)
+	}
+
+	db.logger.Printf("Successfully recorded detection #%d (blocked: %t)", detectionID, isBlocked)
 
 	return tx.Commit()
 }
