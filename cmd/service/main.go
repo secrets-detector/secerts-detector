@@ -108,6 +108,14 @@ func cleanPEM(content string) string {
 func setupRouter() *gin.Engine {
 	r := gin.Default()
 
+	// Add this health check endpoint
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status":  "healthy",
+			"service": "validation-service",
+		})
+	})
+
 	r.POST("/validate", func(c *gin.Context) {
 		var req struct {
 			Content string `json:"content"`

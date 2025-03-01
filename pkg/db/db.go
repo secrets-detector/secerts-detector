@@ -43,9 +43,18 @@ func NewDB(host, port, user, password, dbname string) (*DB, error) {
 		}
 
 		// Test the connection
-		err = db.Ping()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err = db.PingContext(ctx)
+		cancel()
+
 		if err == nil {
 			logger.Printf("Successfully connected to PostgreSQL database")
+
+			// Set connection pool parameters
+			db.SetMaxOpenConns(25)
+			db.SetMaxIdleConns(10)
+			db.SetConnMaxLifetime(time.Hour)
+
 			return &DB{db, logger}, nil
 		}
 
@@ -56,12 +65,37 @@ func NewDB(host, port, user, password, dbname string) (*DB, error) {
 	return nil, fmt.Errorf("failed to connect to database after %d attempts: %v", maxRetries, err)
 }
 
+// Health returns true if the database connection is working
+func (db *DB) Health(ctx context.Context) bool {
+	if db == nil || db.DB == nil {
+		return false
+	}
+
+	// Create a timeout context
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	// Try a simple query to check connectivity
+	rows, err := db.QueryContext(ctx, "SELECT 1")
+	if err != nil {
+		db.logger.Printf("Database health check failed: %v", err)
+		return false
+	}
+	defer rows.Close()
+
+	return true
+}
+
 // RecordDetection logs a secret detection to the database
 func (db *DB) RecordDetection(ctx context.Context, repo *models.Repository, finding models.SecretFinding, commit string) error {
-	// If database connection is nil, log warning and return without error
+	// If database connection is nil, log warning and return error
 	if db == nil || db.DB == nil {
-		log.Printf("Warning: Database connection is nil, skipping recording detection")
-		return nil
+		return fmt.Errorf("database connection is nil")
+	}
+
+	// Check database connectivity
+	if !db.Health(ctx) {
+		return fmt.Errorf("database connection is unhealthy")
 	}
 
 	tx, err := db.BeginTx(ctx, nil)
@@ -72,7 +106,7 @@ func (db *DB) RecordDetection(ctx context.Context, repo *models.Repository, find
 
 	db.logger.Printf("Recording detection for repo %s/%s, secret type: %s", repo.Owner.Login, repo.Name, finding.Type)
 
-	// Get or create repository
+	// Get or create repository with additional logging
 	var repoID int
 	err = tx.QueryRowContext(ctx,
 		`INSERT INTO repositories (name, owner, is_enterprise) 
@@ -82,13 +116,21 @@ func (db *DB) RecordDetection(ctx context.Context, repo *models.Repository, find
 		repo.Name, repo.Owner.Login, repo.Owner.Type == "Organization",
 	).Scan(&repoID)
 	if err != nil {
+		db.logger.Printf("Error upserting repository: %v", err)
 		return fmt.Errorf("error upserting repository: %v", err)
 	}
+	db.logger.Printf("Repository ID: %d", repoID)
 
 	// Determine if we should block based on IsValid field
 	isBlocked := finding.IsValid
 
-	// Record detection
+	// Prep filepath/location field - ensure it's not empty
+	filePath := finding.FilePath
+	if filePath == "" {
+		filePath = "commit message or diff"
+	}
+
+	// Record detection with improved error handling
 	var detectionID int
 	err = tx.QueryRowContext(ctx,
 		`INSERT INTO secret_detections 
@@ -96,16 +138,18 @@ func (db *DB) RecordDetection(ctx context.Context, repo *models.Repository, find
           line_number, is_blocked, validation_status, branch_name, author, commit_timestamp, detected_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          RETURNING id`,
-		repoID, commit, finding.Type, finding.FilePath,
+		repoID, commit, finding.Type, filePath,
 		finding.StartPos, isBlocked,
 		map[bool]string{true: "VALID", false: "INVALID"}[finding.IsValid],
 		"main", "unknown", time.Now(), time.Now(),
 	).Scan(&detectionID)
 	if err != nil {
+		db.logger.Printf("Error inserting detection: %v", err)
 		return fmt.Errorf("error inserting detection: %v", err)
 	}
+	db.logger.Printf("Detection ID: %d", detectionID)
 
-	// Record validation history
+	// If we got this far, record validation history
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO validation_history 
          (detection_id, validation_result, validation_message, validated_at)
@@ -113,12 +157,19 @@ func (db *DB) RecordDetection(ctx context.Context, repo *models.Repository, find
 		detectionID, finding.IsValid, finding.Message, time.Now(),
 	)
 	if err != nil {
+		db.logger.Printf("Error inserting validation history: %v", err)
 		return fmt.Errorf("error inserting validation history: %v", err)
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(); err != nil {
+		db.logger.Printf("Error committing transaction: %v", err)
+		return fmt.Errorf("error committing transaction: %v", err)
 	}
 
 	db.logger.Printf("Successfully recorded detection #%d (blocked: %t)", detectionID, isBlocked)
 
-	return tx.Commit()
+	return nil
 }
 
 func (db *DB) GetMetrics(ctx context.Context, start, end time.Time) ([]models.Metrics, error) {

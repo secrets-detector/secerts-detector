@@ -105,6 +105,103 @@ func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger, testMod
 	}
 }
 
+// startDBConnectionWatcher periodically checks database connection and attempts reconnection if needed
+func (app *SecretDetectorApp) startDBConnectionWatcher(ctx context.Context) {
+	if app == nil {
+		return
+	}
+
+	ticker := time.NewTicker(30 * time.Second)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				ticker.Stop()
+				return
+			case <-ticker.C:
+				if app.db == nil || app.db.DB == nil {
+					app.logger.Printf("Database connection is nil, attempting to reconnect...")
+
+					// Get database connection parameters
+					dbHost := os.Getenv("DB_HOST")
+					dbPort := os.Getenv("DB_PORT")
+					dbUser := os.Getenv("DB_USER")
+					dbPassword := os.Getenv("DB_PASSWORD")
+					dbName := os.Getenv("DB_NAME")
+
+					// Try to connect
+					dbConn, err := db.NewDB(dbHost, dbPort, dbUser, dbPassword, dbName)
+					if err == nil {
+						app.logger.Printf("Successfully reconnected to database")
+						app.db = dbConn
+					} else {
+						app.logger.Printf("Failed to reconnect to database: %v", err)
+					}
+				} else {
+					// Check if the connection is still valid with a ping
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					err := app.db.DB.PingContext(ctx)
+					cancel()
+
+					if err != nil {
+						app.logger.Printf("Database connection ping failed: %v, will attempt to reconnect", err)
+						app.db = nil // Reset connection to trigger reconnect on next tick
+					}
+				}
+			}
+		}
+	}()
+}
+
+// HandleHealth provides a health check endpoint for the application
+func (app *SecretDetectorApp) HandleHealth(w http.ResponseWriter, r *http.Request) {
+	// Check if DB is connected
+	dbConnected := false
+	if app.db != nil && app.db.DB != nil {
+		// Try a simple query to check connection
+		ctx := r.Context()
+		err := app.db.DB.PingContext(ctx)
+		dbConnected = err == nil
+	}
+
+	// Check if validation service is reachable
+	validationServiceReachable := false
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+	_, err := client.Get(app.valService.Endpoint + "/health")
+	validationServiceReachable = err == nil
+
+	// Create response
+	healthStatus := struct {
+		Status                  string `json:"status"`
+		DBConnected             bool   `json:"db_connected"`
+		ValidationServiceStatus bool   `json:"validation_service_reachable"`
+		TestMode                bool   `json:"test_mode"`
+	}{
+		DBConnected:             dbConnected,
+		ValidationServiceStatus: validationServiceReachable,
+		TestMode:                app.testMode,
+	}
+
+	// Determine overall status
+	if dbConnected && validationServiceReachable {
+		healthStatus.Status = "healthy"
+		w.WriteHeader(http.StatusOK)
+	} else {
+		healthStatus.Status = "unhealthy"
+		w.WriteHeader(http.StatusServiceUnavailable)
+		app.logger.Printf("Health check failed: DB connected=%v, Validation service reachable=%v",
+			dbConnected, validationServiceReachable)
+	}
+
+	// Return JSON response
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(healthStatus); err != nil {
+		app.logger.Printf("Error encoding health response: %v", err)
+	}
+}
+
 func loadPatterns(configPath string) (map[string]*regexp.Regexp, error) {
 	log.Printf("Attempting to load patterns from: %s", configPath)
 
@@ -365,15 +462,22 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 					},
 				}
 
-				err := app.db.RecordDetection(
-					ctx,
-					repoModel,
-					finding,
-					head,
-				)
+				// Check database connection before attempting to record
+				if app.db == nil || app.db.DB == nil {
+					app.logger.Printf("ERROR: Cannot record detection - database connection is nil")
+				} else {
+					err := app.db.RecordDetection(
+						ctx,
+						repoModel,
+						finding,
+						head,
+					)
 
-				if err != nil {
-					app.logger.Printf("Error recording detection: %v", err)
+					if err != nil {
+						app.logger.Printf("ERROR: Failed to record detection in database: %v", err)
+					} else {
+						app.logger.Printf("Successfully recorded detection in database for valid %s", finding.Type)
+					}
 				}
 			} else {
 				app.logger.Printf("ALLOWING: Found invalid/test %s in commit", finding.Type)
@@ -390,15 +494,22 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 				// Mark as not blocked since it's invalid/test data
 				finding.Message += " (Commit allowed - not blocked)"
 
-				err := app.db.RecordDetection(
-					ctx,
-					repoModel,
-					finding,
-					head,
-				)
+				// Check database connection before attempting to record
+				if app.db == nil || app.db.DB == nil {
+					app.logger.Printf("ERROR: Cannot record detection - database connection is nil")
+				} else {
+					err := app.db.RecordDetection(
+						ctx,
+						repoModel,
+						finding,
+						head,
+					)
 
-				if err != nil {
-					app.logger.Printf("Error recording detection: %v", err)
+					if err != nil {
+						app.logger.Printf("ERROR: Failed to record detection in database: %v", err)
+					} else {
+						app.logger.Printf("Successfully recorded detection in database for invalid %s", finding.Type)
+					}
 				}
 			}
 		}
@@ -610,6 +721,47 @@ func main() {
 
 	app := NewSecretDetectorApp(validationServiceURL, logger, testMode)
 
+	// Create a context for the app lifetime
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Wait for database to be ready before continuing
+	if app.db == nil {
+		logger.Printf("Database connection failed initially, waiting for database to be ready...")
+
+		// Get database connection parameters again
+		dbHost := os.Getenv("DB_HOST")
+		dbPort := os.Getenv("DB_PORT")
+		dbUser := os.Getenv("DB_USER")
+		dbPassword := os.Getenv("DB_PASSWORD")
+		dbName := os.Getenv("DB_NAME")
+
+		// Try with extended retries and delay
+		maxRetries := 15
+		retryDelay := time.Second * 10
+
+		for i := 0; i < maxRetries; i++ {
+			logger.Printf("Attempting to connect to database (extended attempt %d/%d)...", i+1, maxRetries)
+
+			dbConn, err := db.NewDB(dbHost, dbPort, dbUser, dbPassword, dbName)
+			if err == nil {
+				logger.Printf("Successfully connected to database")
+				app.db = dbConn
+				break
+			}
+
+			logger.Printf("Warning: Failed to connect to database: %v. Retrying in %v...", err, retryDelay)
+			time.Sleep(retryDelay)
+		}
+
+		if app.db == nil {
+			logger.Printf("WARNING: ALL DATABASE CONNECTION ATTEMPTS FAILED. THE APP WILL RUN WITH LIMITED FUNCTIONALITY.")
+		}
+	}
+
+	// Start the DB connection watcher
+	app.startDBConnectionWatcher(ctx)
+
 	// Load GitHub.com private key
 	privateKey, err := os.ReadFile("/app/keys/github.pem")
 	if err != nil {
@@ -669,6 +821,7 @@ func main() {
 
 	http.HandleFunc("/webhook", app.HandleWebhook)
 	http.HandleFunc("/validate", app.HandleValidate)
+	http.HandleFunc("/health", app.HandleHealth)
 
 	listenAddr := ":8080"
 	logger.Printf("Starting server on %s", listenAddr)
