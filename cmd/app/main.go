@@ -45,9 +45,10 @@ type SecretDetectorApp struct {
 	logger     *log.Logger
 	patterns   map[string]*regexp.Regexp
 	db         *db.DB // Database field
+	testMode   bool   // New field to indicate test mode
 }
 
-func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger) *SecretDetectorApp {
+func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger, testMode bool) *SecretDetectorApp {
 	if logger == nil {
 		logger = log.New(os.Stdout, "[SecretDetector] ", log.LstdFlags|log.Lshortfile)
 	}
@@ -100,6 +101,7 @@ func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger) *Secret
 		logger:   logger,
 		patterns: patterns,
 		db:       dbConn,
+		testMode: testMode,
 	}
 }
 
@@ -307,19 +309,29 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 	head := event.GetAfter()
 	repo := event.GetRepo()
 
-	// Get the diff content
-	diff, err := app.getDiff(ctx, client, &github.Repository{Owner: repo.Owner, Name: repo.Name}, base, head)
-	if err != nil {
-		return fmt.Errorf("failed to get diff: %v", err)
-	}
-
 	// Collect all content to scan
 	var contentToScan []string
-	contentToScan = append(contentToScan, diff)
 
-	// Add commit messages to scan
-	for _, commit := range event.Commits {
-		contentToScan = append(contentToScan, commit.GetMessage())
+	if app.testMode {
+		// In test mode, skip GitHub API calls and just use commit messages
+		app.logger.Printf("Running in test mode - skipping diff retrieval from GitHub API")
+
+		// Just use the commit messages for validation
+		for _, commit := range event.Commits {
+			contentToScan = append(contentToScan, commit.GetMessage())
+		}
+	} else {
+		// Normal mode - get diff from GitHub API
+		diff, err := app.getDiff(ctx, client, &github.Repository{Owner: repo.Owner, Name: repo.Name}, base, head)
+		if err != nil {
+			return fmt.Errorf("failed to get diff: %v", err)
+		}
+		contentToScan = append(contentToScan, diff)
+
+		// Also add commit messages
+		for _, commit := range event.Commits {
+			contentToScan = append(contentToScan, commit.GetMessage())
+		}
 	}
 
 	// Combine all content with newlines
@@ -390,6 +402,12 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 				}
 			}
 		}
+	}
+
+	// In test mode, we can skip the create status call as well
+	if app.testMode {
+		app.logger.Printf("Test mode: Skipping GitHub status update")
+		return nil
 	}
 
 	// Create GitHub status based on findings
@@ -584,7 +602,13 @@ func main() {
 		validationServiceURL = "http://validation-service:8080"
 	}
 
-	app := NewSecretDetectorApp(validationServiceURL, logger)
+	// Check if we're in test mode
+	testMode := os.Getenv("TEST_MODE") == "true"
+	if testMode {
+		logger.Printf("Starting in TEST MODE - GitHub API calls will be skipped")
+	}
+
+	app := NewSecretDetectorApp(validationServiceURL, logger, testMode)
 
 	// Load GitHub.com private key
 	privateKey, err := os.ReadFile("/app/keys/github.pem")

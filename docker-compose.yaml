@@ -32,9 +32,10 @@ services:
       - APP_ENV=development
       - LOG_LEVEL=debug
       - VALIDATION_SERVICE_URL=http://validation-service:8080
-      - GITHUB_APP_ID=${GITHUB_APP_ID}
-      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID}
-      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-dummysecret}
+      - GITHUB_APP_ID=${GITHUB_APP_ID:-12345}
+      - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID:-67890}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-development_webhook_secret_123}
+      - TEST_MODE=${TEST_MODE:-false}  # Add this for test mode toggle
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_USER=secretsuser
