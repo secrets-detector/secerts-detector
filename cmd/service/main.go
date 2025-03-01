@@ -3,8 +3,10 @@ package main
 import (
 	"crypto/x509"
 	"encoding/pem"
+	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -12,41 +14,134 @@ import (
 	"secrets-detector/pkg/models"
 )
 
-func validateCertificate(cert string) bool {
+// ValidateCertificate checks if the provided certificate is valid
+func validateCertificate(cert string) (bool, string) {
+	if !strings.Contains(cert, "BEGIN CERTIFICATE") {
+		return false, "Not a certificate"
+	}
+
+	// Check for test/dummy certificates
+	if strings.Contains(strings.ToLower(cert), "test") ||
+		strings.Contains(strings.ToLower(cert), "dummy") ||
+		strings.Contains(strings.ToLower(cert), "example") {
+		return false, "Test certificate"
+	}
+
 	block, _ := pem.Decode([]byte(cert))
 	if block == nil {
-		return false
+		return false, "Invalid PEM format"
 	}
 
-	_, err := x509.ParseCertificate(block.Bytes)
-	return err == nil
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return false, "Invalid certificate: " + err.Error()
+	}
+
+	// It's a valid certificate
+	issuer := certificate.Issuer.CommonName
+	subject := certificate.Subject.CommonName
+	return true, "Valid certificate issued by " + issuer + " for " + subject
 }
 
-func validatePrivateKey(key string) bool {
+// ValidatePrivateKey checks if the provided private key is valid
+func validatePrivateKey(key string) (bool, string) {
+	if !strings.Contains(key, "BEGIN") || !strings.Contains(key, "PRIVATE KEY") {
+		return false, "Not a private key"
+	}
+
+	// Check for test/dummy keys
+	if strings.Contains(strings.ToLower(key), "test") ||
+		strings.Contains(strings.ToLower(key), "dummy") ||
+		strings.Contains(strings.ToLower(key), "example") {
+		return false, "Test private key"
+	}
+
 	block, _ := pem.Decode([]byte(key))
 	if block == nil {
-		return false
+		return false, "Invalid PEM format"
 	}
 
+	var err error
 	switch block.Type {
 	case "RSA PRIVATE KEY":
-		_, err := x509.ParsePKCS1PrivateKey(block.Bytes)
-		return err == nil
+		_, err = x509.ParsePKCS1PrivateKey(block.Bytes)
 	case "EC PRIVATE KEY":
-		_, err := x509.ParseECPrivateKey(block.Bytes)
-		return err == nil
+		_, err = x509.ParseECPrivateKey(block.Bytes)
+	case "PRIVATE KEY":
+		_, err = x509.ParsePKCS8PrivateKey(block.Bytes)
+	default:
+		return false, "Unsupported private key type: " + block.Type
 	}
-	return false
-}
 
-func validateAWSKey(key string) bool {
-	return strings.HasPrefix(key, "AKIA") && len(key) == 20
+	if err != nil {
+		return false, "Invalid private key: " + err.Error()
+	}
+
+	return true, "Valid " + block.Type
 }
 
 func setupRouter() *gin.Engine {
 	r := gin.Default()
 
 	r.POST("/validate", func(c *gin.Context) {
+		var req struct {
+			Content string `json:"content"`
+		}
+		if err := c.BindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Invalid request format",
+			})
+			return
+		}
+
+		// Look for patterns in the content
+		findings := []models.SecretFinding{}
+
+		// Check for certificates
+		certPattern := "-----BEGIN CERTIFICATE-----[\\s\\S]*?-----END CERTIFICATE-----"
+		certRegex := regexp.MustCompile(certPattern)
+		certMatches := certRegex.FindAllStringIndex(req.Content, -1)
+
+		for _, match := range certMatches {
+			cert := req.Content[match[0]:match[1]]
+			isValid, message := validateCertificate(cert)
+			finding := models.SecretFinding{
+				Type:     "certificate",
+				Value:    cert,
+				StartPos: match[0],
+				EndPos:   match[1],
+				IsValid:  isValid,
+				Message:  message,
+			}
+			findings = append(findings, finding)
+		}
+
+		// Check for private keys
+		keyPattern := "-----BEGIN [\\w\\s]+ PRIVATE KEY-----[\\s\\S]*?-----END [\\w\\s]+ PRIVATE KEY-----"
+		keyRegex := regexp.MustCompile(keyPattern)
+		keyMatches := keyRegex.FindAllStringIndex(req.Content, -1)
+
+		for _, match := range keyMatches {
+			key := req.Content[match[0]:match[1]]
+			isValid, message := validatePrivateKey(key)
+			finding := models.SecretFinding{
+				Type:     "private_key",
+				Value:    key,
+				StartPos: match[0],
+				EndPos:   match[1],
+				IsValid:  isValid,
+				Message:  message,
+			}
+			findings = append(findings, finding)
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"findings": findings,
+		})
+	})
+
+	// Endpoint for validating individual secrets
+	r.POST("/validate/secret", func(c *gin.Context) {
 		var req models.ValidationRequest
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, models.ValidationResponse{
@@ -61,21 +156,12 @@ func setupRouter() *gin.Engine {
 
 		switch req.Secret.Type {
 		case "certificate":
-			isValid = validateCertificate(req.Secret.Value)
-			message = "Invalid certificate format"
+			isValid, message = validateCertificate(req.Secret.Value)
 		case "private_key":
-			isValid = validatePrivateKey(req.Secret.Value)
-			message = "Invalid private key format"
-		case "aws_key":
-			isValid = validateAWSKey(req.Secret.Value)
-			message = "Invalid AWS key format"
+			isValid, message = validatePrivateKey(req.Secret.Value)
 		default:
 			isValid = false
-			message = "Unknown secret type"
-		}
-
-		if isValid {
-			message = "Valid " + req.Secret.Type
+			message = "Unsupported secret type"
 		}
 
 		c.JSON(http.StatusOK, models.ValidationResponse{
@@ -92,6 +178,10 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
+
+	// Add standard library logging
+	logger := log.New(os.Stdout, "[ValidationService] ", log.LstdFlags)
+	logger.Printf("Starting validation service on port %s", port)
 
 	r := setupRouter()
 	r.Run(":" + port)
