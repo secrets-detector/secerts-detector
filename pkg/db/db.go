@@ -16,29 +16,54 @@ type DB struct {
 	logger *log.Logger
 }
 
+// NewDB establishes a connection to the database with retry logic
 func NewDB(host, port, user, password, dbname string) (*DB, error) {
 	connStr := fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
 		host, port, user, password, dbname,
 	)
 
-	db, err := sql.Open("postgres", connStr)
-	if err != nil {
-		return nil, fmt.Errorf("error connecting to database: %v", err)
-	}
-
-	// Test connection
-	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("error connecting to the database: %v", err)
-	}
-
 	logger := log.New(log.Writer(), "[DB] ", log.LstdFlags)
-	logger.Printf("Successfully connected to PostgreSQL database")
 
-	return &DB{db, logger}, nil
+	// Add retry logic for database connection
+	var db *sql.DB
+	var err error
+
+	maxRetries := 5
+	retryDelay := 5 * time.Second
+
+	for i := 0; i < maxRetries; i++ {
+		logger.Printf("Attempting to connect to PostgreSQL database (attempt %d/%d)...", i+1, maxRetries)
+
+		db, err = sql.Open("postgres", connStr)
+		if err != nil {
+			logger.Printf("Error opening database connection: %v", err)
+			time.Sleep(retryDelay)
+			continue
+		}
+
+		// Test the connection
+		err = db.Ping()
+		if err == nil {
+			logger.Printf("Successfully connected to PostgreSQL database")
+			return &DB{db, logger}, nil
+		}
+
+		logger.Printf("Failed to ping database: %v. Retrying in %v...", err, retryDelay)
+		time.Sleep(retryDelay)
+	}
+
+	return nil, fmt.Errorf("failed to connect to database after %d attempts: %v", maxRetries, err)
 }
 
+// RecordDetection logs a secret detection to the database
 func (db *DB) RecordDetection(ctx context.Context, repo *models.Repository, finding models.SecretFinding, commit string) error {
+	// If database connection is nil, log warning and return without error
+	if db == nil || db.DB == nil {
+		log.Printf("Warning: Database connection is nil, skipping recording detection")
+		return nil
+	}
+
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("error starting transaction: %v", err)
@@ -97,6 +122,12 @@ func (db *DB) RecordDetection(ctx context.Context, repo *models.Repository, find
 }
 
 func (db *DB) GetMetrics(ctx context.Context, start, end time.Time) ([]models.Metrics, error) {
+	// If database connection is nil, return empty slice without error
+	if db == nil || db.DB == nil {
+		log.Printf("Warning: Database connection is nil, returning empty metrics")
+		return []models.Metrics{}, nil
+	}
+
 	rows, err := db.QueryContext(ctx,
 		`SELECT detection_date, owner, repository_name, 
                 secret_type, validation_status, detection_count, blocked_count
@@ -127,6 +158,12 @@ func (db *DB) GetMetrics(ctx context.Context, start, end time.Time) ([]models.Me
 }
 
 func (db *DB) GetRepositoryRiskMetrics(ctx context.Context) ([]models.RiskMetrics, error) {
+	// If database connection is nil, return empty slice without error
+	if db == nil || db.DB == nil {
+		log.Printf("Warning: Database connection is nil, returning empty risk metrics")
+		return []models.RiskMetrics{}, nil
+	}
+
 	rows, err := db.QueryContext(ctx,
 		`SELECT owner, repository_name, total_detections, 
                 unique_secret_types, last_detection, total_blocked

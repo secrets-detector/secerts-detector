@@ -52,18 +52,39 @@ func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger) *Secret
 	patterns, err := loadPatterns("/app/config/config.json")
 	if err != nil {
 		logger.Printf("Warning: Failed to load patterns: %v", err)
+		// Initialize with empty patterns map to prevent nil pointer dereference
+		patterns = make(map[string]*regexp.Regexp)
 	}
 
-	// Initialize database connection
+	// Initialize database connection with retries
+	var dbConn *db.DB
+
+	// Get database connection parameters
 	dbHost := os.Getenv("DB_HOST")
 	dbPort := os.Getenv("DB_PORT")
 	dbUser := os.Getenv("DB_USER")
 	dbPassword := os.Getenv("DB_PASSWORD")
 	dbName := os.Getenv("DB_NAME")
 
-	dbConn, err := db.NewDB(dbHost, dbPort, dbUser, dbPassword, dbName)
-	if err != nil {
-		logger.Printf("Warning: Failed to connect to database: %v", err)
+	// Try to connect with retries
+	maxRetries := 5
+	retryDelay := time.Second * 5
+
+	for i := 0; i < maxRetries; i++ {
+		logger.Printf("Attempting to connect to database (attempt %d/%d)...", i+1, maxRetries)
+
+		dbConn, err = db.NewDB(dbHost, dbPort, dbUser, dbPassword, dbName)
+		if err == nil {
+			logger.Printf("Successfully connected to database")
+			break
+		}
+
+		logger.Printf("Warning: Failed to connect to database: %v. Retrying in %v...", err, retryDelay)
+		time.Sleep(retryDelay)
+	}
+
+	if dbConn == nil {
+		logger.Printf("Warning: All database connection attempts failed. App will run with limited functionality.")
 	}
 
 	return &SecretDetectorApp{
