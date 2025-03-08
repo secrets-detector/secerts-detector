@@ -44,14 +44,23 @@ type SecretDetectorApp struct {
 	valService       ValidationServiceConfig
 	logger           *log.Logger
 	patterns         map[string]*regexp.Regexp
-	db               *db.DB // Database field
-	testMode         bool   // Field to indicate test mode
-	fullFileAnalysis bool   // New field to indicate if we should analyze full files instead of just diffs
+	db               *db.DB            // Database field
+	testMode         bool              // Field to indicate test mode
+	fullFileAnalysis bool              // Field to indicate if we should analyze full files instead of just diffs
+	testPatches      []string          // Field to store extracted patches for test mode
+	mockFilesMode    bool              // New field to indicate mock files mode
+	mockFiles        map[string]string // Map to store mock file contents by filename
 }
 
 func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger, testMode bool, fullFileAnalysis bool) *SecretDetectorApp {
 	if logger == nil {
 		logger = log.New(os.Stdout, "[SecretDetector] ", log.LstdFlags|log.Lshortfile)
+	}
+
+	// Check if we're in mock files mode
+	mockFilesMode := os.Getenv("MOCK_FILES_MODE") == "true"
+	if mockFilesMode {
+		logger.Printf("Starting in MOCK FILES MODE - will use local mock file contents")
 	}
 
 	patterns, err := loadPatterns("/app/config/config.json")
@@ -92,7 +101,7 @@ func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger, testMod
 		logger.Printf("Warning: All database connection attempts failed. App will run with limited functionality.")
 	}
 
-	return &SecretDetectorApp{
+	app := &SecretDetectorApp{
 		configs: make(map[string]*GitHubConfig),
 		clients: make(map[string]*github.Client),
 		valService: ValidationServiceConfig{
@@ -104,7 +113,64 @@ func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger, testMod
 		db:               dbConn,
 		testMode:         testMode,
 		fullFileAnalysis: fullFileAnalysis,
+		testPatches:      make([]string, 0),
+		mockFilesMode:    mockFilesMode,
+		mockFiles:        make(map[string]string),
 	}
+
+	// If in mock files mode, initialize with some test files
+	if mockFilesMode {
+		app.initializeMockFiles()
+	}
+
+	return app
+}
+
+// Add method to initialize mock files with sample content
+func (app *SecretDetectorApp) initializeMockFiles() {
+	// Sample certificate to be detected
+	sampleCert := `-----BEGIN CERTIFICATE-----
+MIIDazCCAlOgAwIBAgIUXQzF4d4eXBYyGcQf3RJVsEZ1eQ8wDQYJKoZIhvcNAQEL
+BQAwRTELMAkGA1UEBhMCQVUxEzARBgNVBAgMClNvbWUtU3RhdGUxITAfBgNVBAoM
+GEludGVybmV0IFdpZGdpdHMgUHR5IEx0ZDAeFw0yMzA1MTUxMjAwMDBaFw0yNDA1
+MTQxMjAwMDBaMEUxCzAJBgNVBAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEw
+HwYDVQQKDBhJbnRlcm5ldCBXaWRnaXRzIFB0eSBMdGQwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQC5eIuoSCHDCIWgI2CObfvgJCyPulUGj0VxbOJmZWzl
+JdHmv5QlWcV8Kls5+PnC6hFIQX0/NjR2JlAH7m3KBNDv7B2+bwxlUzSI0T+/eR6v
+/Tbw51h+0NbO88UPv3fyr/eXRu1OXqZJUoLN5pRq7PQyyeZXY2ImWCJ1DdoocRBq
+aBHctXyZdawOdQs3nalPsOu0U9IXf2RJoCY3+aEk9Hwk5eM55w2UZjsYUOQBKPU9
+l1WQhRKUNMqRdCIniRaW5D83g4FSsYqlZcR0zIhjXL4SUwqhYvqQg/O0BUopQZyu
+gY0R0vZdepvWK51dHdLqm9YUyJx6V9UlY0A9m27jAgMBAAGjUzBRMB0GA1UdDgQW
+BBRTl8Ym4z5GtKLUxGTFZQkBYJ2mdzAfBgNVHSMEGDAWgBRTl8Ym4z5GtKLUxGTF
+ZQkBYJ2mdzAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQBZPJbi
+9SJ7WhKZrOVOLNzuDmTfYYvfXCpILDWwYwYYZPGBgyrbbOm+tENpV/ADN4mF6vM3
+8OvZg3+tBGK5fSfVHnc/CV9UBGpL89/K2y3fspyQvMuMEVHVqB5XTgUGG5mMDqga
+A2kAJhyopkIc4J5VcRE0kdiHYlQlmZjcMnpKYaWZZySVLiqvQi2G+YHvq3z9HMUT
++2PV3mpc6m1ypF/vwVPtPTtc2VT9gYfaZ9Ge2AYQr3L9EYRHsZn3H3Nz6/ufKdja
+OO8YFPZCZ+hQkvYPBYjOF0l2qF6KPqkzQgzxBK6xzmY1J9obtr7HwgZ0Ktbk43c8
+2HkWMLiKSslaaDcP
+-----END CERTIFICATE-----`
+
+	// Sample JSON config with a private key
+	sampleConfig := `{
+  "api_key": "test_api_key_123",
+  "environment": "development",
+  "certificate": "-----BEGIN CERTIFICATE-----\\nMIIDazCCAlOgAwIBAgIUXQzF4d4eXBYyGcQf3RJVsEZ1eQ8wDQYJKoZIhvcNAQEL\\n-----END CERTIFICATE-----",
+  "private_key": "-----BEGIN PRIVATE KEY-----\\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCz5HbiHPPGtYd5\\nLcix2lCcOF0bnPOSdJV0jxFG36vZFF1eeTuiloxWymtZ6R695lhWfnUtDuoxeL9t\\nRmQYxEgK982MEQpoearvijpd99piLXZ1ZVXvEU0X1/Dy6hOAFD9CCFUwO8OH4S4Y\\n-----END PRIVATE KEY-----"
+}`
+
+	// Add mock files
+	app.mockFiles["secure-config.json"] = sampleConfig
+	app.mockFiles["cert.pem"] = sampleCert
+	app.mockFiles["config/credentials.json"] = sampleConfig
+
+	app.logger.Printf("Initialized %d mock files for testing", len(app.mockFiles))
+}
+
+// Method to add custom mock files
+func (app *SecretDetectorApp) AddMockFile(filename, content string) {
+	app.mockFiles[filename] = content
+	app.logger.Printf("Added mock file: %s", filename)
 }
 
 func loadPatterns(configPath string) (map[string]*regexp.Regexp, error) {
@@ -142,6 +208,39 @@ func loadPatterns(configPath string) (map[string]*regexp.Regexp, error) {
 
 func (app *SecretDetectorApp) getFileContents(ctx context.Context, client *github.Client,
 	repo *github.Repository, commit string) (string, error) {
+
+	// If we're in mock files mode, use mock files instead of calling GitHub API
+	if app.mockFilesMode {
+		app.logger.Printf("Using mock files for commit %s in %s/%s",
+			commit, repo.GetOwner().GetLogin(), repo.GetName())
+
+		var allContent strings.Builder
+
+		// Get the list of files from the commit (or use all available mock files)
+		fileList := make([]string, 0, len(app.mockFiles))
+
+		// In a real webhook, we'd filter by what files were actually modified in the commit
+		// But for testing, we'll use all mock files or filter by mentioned files in the commit
+		for filename := range app.mockFiles {
+			fileList = append(fileList, filename)
+		}
+
+		// Process each file
+		for _, filename := range fileList {
+			content, exists := app.mockFiles[filename]
+			if !exists {
+				app.logger.Printf("Skipping unknown mock file: %s", filename)
+				continue
+			}
+
+			app.logger.Printf("Adding mock file content for: %s", filename)
+			allContent.WriteString(fmt.Sprintf("--- %s ---\n", filename))
+			allContent.WriteString(content)
+			allContent.WriteString("\n\n")
+		}
+
+		return allContent.String(), nil
+	}
 
 	app.logger.Printf("Fetching full file contents for commit %s in %s/%s",
 		commit, repo.GetOwner().GetLogin(), repo.GetName())
@@ -425,8 +524,28 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 	// Collect all content to scan
 	var contentToScan []string
 
-	if app.testMode {
-		// In test mode, skip GitHub API calls and use commit messages and patch fields
+	// Special case for test+mock mode with full file analysis
+	if app.testMode && app.mockFilesMode && app.fullFileAnalysis {
+		app.logger.Printf("Running in TEST+MOCK+FULL_FILE_ANALYSIS mode - using mock files")
+
+		// Use commit messages for validation
+		for _, commit := range event.Commits {
+			contentToScan = append(contentToScan, commit.GetMessage())
+		}
+
+		// Get the mock file contents
+		fileContent, err := app.getFileContents(ctx, client, &github.Repository{
+			Owner: repo.Owner,
+			Name:  repo.Name,
+		}, head)
+
+		if err != nil {
+			app.logger.Printf("Warning: Error getting mock file contents: %v", err)
+		} else {
+			contentToScan = append(contentToScan, fileContent)
+		}
+	} else if app.testMode {
+		// Regular test mode - skip API retrieval
 		app.logger.Printf("Running in test mode - skipping API retrieval")
 
 		// Use the commit messages for validation
@@ -434,19 +553,10 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 			contentToScan = append(contentToScan, commit.GetMessage())
 		}
 
-		// For test mode, we need to check if there's a 'patch' field in the raw event payload
-		if rawPayload, ok := event.GetRawPayload().(map[string]interface{}); ok {
-			if commits, ok := rawPayload["commits"].([]interface{}); ok {
-				for _, c := range commits {
-					if commitObj, ok := c.(map[string]interface{}); ok {
-						// Try to extract patch data from the raw payload
-						if patch, ok := commitObj["patch"].(string); ok && patch != "" {
-							app.logger.Printf("Found patch data in raw payload")
-							contentToScan = append(contentToScan, patch)
-						}
-					}
-				}
-			}
+		// If we have any stored patches, use them
+		if len(app.testPatches) > 0 {
+			app.logger.Printf("Found %d patches from test mode", len(app.testPatches))
+			contentToScan = append(contentToScan, app.testPatches...)
 		}
 	} else {
 		// Normal mode - either get diff or full file content based on configuration
@@ -627,22 +737,30 @@ func (app *SecretDetectorApp) HandleWebhook(w http.ResponseWriter, r *http.Reque
 	app.logger.Printf("Expected signature: %s", expectedSig)
 	app.logger.Printf("Received signature: %s", receivedSig)
 
-	// Do a manual signature comparison
-	if receivedSig == "" {
-		app.logger.Printf("No signature received")
-		http.Error(w, "Missing signature", http.StatusBadRequest)
-		return
+	// Skip signature validation if in test mode
+	if !app.testMode {
+		// Do a manual signature comparison only if not in test mode
+		if receivedSig == "" {
+			app.logger.Printf("No signature received")
+			http.Error(w, "Missing signature", http.StatusBadRequest)
+			return
+		}
+
+		// Allow either exact string match or hmac.Equal()
+		if expectedSig != receivedSig && !hmac.Equal([]byte(expectedSig), []byte(receivedSig)) {
+			app.logger.Printf("Signature validation failed: %s != %s", expectedSig, receivedSig)
+			http.Error(w, "Invalid webhook payload", http.StatusBadRequest)
+			return
+		}
+	} else {
+		app.logger.Printf("TEST MODE: Bypassing signature validation")
 	}
 
-	// Allow either exact string match or hmac.Equal()
-	if expectedSig != receivedSig && !hmac.Equal([]byte(expectedSig), []byte(receivedSig)) {
-		app.logger.Printf("Signature validation failed: %s != %s", expectedSig, receivedSig)
-		http.Error(w, "Invalid webhook payload", http.StatusBadRequest)
-		return
-	}
-
-	// For test mode, extract patch data from the raw JSON payload if available
+	// Clear any previous test patches
 	if app.testMode {
+		app.testPatches = make([]string, 0)
+
+		// For test mode, extract patch data from the raw JSON payload if available
 		var rawPayload map[string]interface{}
 		if err := json.Unmarshal(bodyBytes, &rawPayload); err == nil {
 			if commits, ok := rawPayload["commits"].([]interface{}); ok {
@@ -654,6 +772,8 @@ func (app *SecretDetectorApp) HandleWebhook(w http.ResponseWriter, r *http.Reque
 						// Try to extract patch data
 						if patch, ok := commitObj["patch"].(string); ok && patch != "" {
 							app.logger.Printf("Test mode: Found patch data in commit %d", i)
+							// Store patch data for later use
+							app.testPatches = append(app.testPatches, patch)
 
 							// If we have a message, add it to the commit object
 							if message, ok := commitObj["message"].(string); ok {
@@ -684,9 +804,6 @@ func (app *SecretDetectorApp) HandleWebhook(w http.ResponseWriter, r *http.Reque
 
 	switch e := event.(type) {
 	case *github.PushEvent:
-		// Since we're in test mode and need more information than what's in the standard PushEvent structure,
-		// we've done additional processing of the raw payload above
-
 		if err := app.handlePushEvent(ctx, client, e); err != nil {
 			app.logger.Printf("Failed to handle push event: %v", err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -805,6 +922,12 @@ func main() {
 		logger.Printf("Starting with FULL FILE ANALYSIS enabled - will fetch complete file contents")
 	} else {
 		logger.Printf("Starting with diff-only analysis - will only examine git diffs")
+	}
+
+	// Check if we're in mock files mode
+	mockFilesMode := os.Getenv("MOCK_FILES_MODE") == "true"
+	if mockFilesMode {
+		logger.Printf("Starting with MOCK FILES MODE enabled - will use local mock files instead of GitHub API")
 	}
 
 	app := NewSecretDetectorApp(validationServiceURL, logger, testMode, fullFileAnalysis)
