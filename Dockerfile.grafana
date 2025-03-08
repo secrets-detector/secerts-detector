@@ -9,7 +9,6 @@ ENV GF_SECURITY_ADMIN_USER=admin \
     GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
 
 # Create necessary directories
-USER root
 RUN mkdir -p /var/lib/grafana/dashboards \
              /etc/grafana/provisioning/datasources \
              /etc/grafana/provisioning/dashboards
@@ -21,10 +20,3 @@ COPY grafana/provisioning/dashboards/dashboard.yaml /etc/grafana/provisioning/da
 # Copy dashboard JSON files
 COPY grafana/provisioning/dashboards/executive-dashboard.json /var/lib/grafana/dashboards/
 COPY grafana/provisioning/dashboards/repository-metrics.json /var/lib/grafana/dashboards/
-
-# Set proper permissions
-RUN chown -R grafana:grafana /var/lib/grafana/dashboards /etc/grafana/provisioning && \
-    chmod -R 755 /var/lib/grafana/dashboards
-
-# Switch back to grafana user
-USER grafana
