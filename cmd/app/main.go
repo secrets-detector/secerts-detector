@@ -24,6 +24,205 @@ import (
 	"github.com/google/go-github/v45/github"
 )
 
+// SafeLogger wraps the standard logger with sanitization methods
+type SafeLogger struct {
+	*log.Logger
+	logLevel string // "debug", "info", "warn", "error"
+}
+
+// NewSafeLogger creates a new safe logger with proper sanitization
+func NewSafeLogger(logger *log.Logger, level string) *SafeLogger {
+	return &SafeLogger{
+		Logger:   logger,
+		logLevel: strings.ToLower(level),
+	}
+}
+
+// isLevelEnabled checks if the given log level should be logged
+func (s *SafeLogger) isLevelEnabled(level string) bool {
+	levels := map[string]int{
+		"debug": 0,
+		"info":  1,
+		"warn":  2,
+		"error": 3,
+	}
+
+	currentLevel, ok := levels[s.logLevel]
+	if !ok {
+		return true // Default to showing everything if level is unknown
+	}
+
+	requestedLevel, ok := levels[level]
+	if !ok {
+		return true // Default to showing the message if level is unknown
+	}
+
+	return requestedLevel >= currentLevel
+}
+
+// Debug logs debug messages, with heavy sanitization in production
+func (s *SafeLogger) Debug(format string, v ...interface{}) {
+	if !s.isLevelEnabled("debug") {
+		return
+	}
+
+	// Apply extra sanitization for debug messages
+	sanitizedArgs := make([]interface{}, len(v))
+	for i, arg := range v {
+		switch val := arg.(type) {
+		case string:
+			sanitizedArgs[i] = sanitizeContent(val)
+		default:
+			sanitizedArgs[i] = arg
+		}
+	}
+
+	s.Logger.Printf("[DEBUG] "+format, sanitizedArgs...)
+}
+
+// Info logs info messages with moderate sanitization
+func (s *SafeLogger) Info(format string, v ...interface{}) {
+	if !s.isLevelEnabled("info") {
+		return
+	}
+
+	// Apply sanitization for info messages
+	sanitizedArgs := make([]interface{}, len(v))
+	for i, arg := range v {
+		switch val := arg.(type) {
+		case string:
+			if isSensitiveContent(val) {
+				sanitizedArgs[i] = "[REDACTED]"
+			} else {
+				sanitizedArgs[i] = val
+			}
+		default:
+			sanitizedArgs[i] = arg
+		}
+	}
+
+	s.Logger.Printf("[INFO] "+format, sanitizedArgs...)
+}
+
+// Warn logs warning messages
+func (s *SafeLogger) Warn(format string, v ...interface{}) {
+	if !s.isLevelEnabled("warn") {
+		return
+	}
+	s.Logger.Printf("[WARN] "+format, v...)
+}
+
+// Error logs error messages
+func (s *SafeLogger) Error(format string, v ...interface{}) {
+	if !s.isLevelEnabled("error") {
+		return
+	}
+	s.Logger.Printf("[ERROR] "+format, v...)
+}
+
+// LogSignature safely logs a signature value
+func (s *SafeLogger) LogSignature(description, signature string) {
+	if !s.isLevelEnabled("debug") {
+		return
+	}
+	s.Debug("%s: %s", description, sanitizeSignature(signature))
+}
+
+// LogPayload safely logs a payload
+func (s *SafeLogger) LogPayload(description, payload string) {
+	if !s.isLevelEnabled("debug") {
+		return
+	}
+	s.Debug("%s: %s", description, sanitizePayload(payload))
+}
+
+// LogCertificate safely logs certificate information
+func (s *SafeLogger) LogCertificate(description, cert string) {
+	if !s.isLevelEnabled("debug") {
+		return
+	}
+	s.Debug("%s found, length: %d", description, len(cert))
+}
+
+// sanitizeSignature redacts most of a signature for logging
+func sanitizeSignature(signature string) string {
+	if len(signature) <= 10 {
+		return "[REDACTED]"
+	}
+	// Keep only first 6 and last 4 characters
+	return signature[:6] + "..." + signature[len(signature)-4:]
+}
+
+// sanitizePayload redacts payload content for logging
+func sanitizePayload(payload string) string {
+	if len(payload) <= 20 {
+		return "[PAYLOAD_REDACTED]"
+	}
+
+	// For JSON payloads, extract only the structure, not the values
+	if len(payload) > 0 && payload[0] == '{' {
+		return "[JSON_PAYLOAD_STRUCTURE_ONLY]"
+	}
+
+	// For other payloads, show only length and first few non-sensitive chars
+	return fmt.Sprintf("[PAYLOAD_LENGTH: %d chars] %s...",
+		len(payload), payload[:10])
+}
+
+// sanitizeCertificate redacts certificate content for logging
+func sanitizeCertificate(cert string) string {
+	if strings.Contains(cert, "BEGIN CERTIFICATE") {
+		return "[CERTIFICATE_REDACTED]"
+	}
+	return cert
+}
+
+// sanitizePrivateKey redacts private key content for logging
+func sanitizePrivateKey(key string) string {
+	if strings.Contains(key, "PRIVATE KEY") {
+		return "[PRIVATE_KEY_REDACTED]"
+	}
+	return key
+}
+
+// isSensitiveContent checks if content might contain sensitive data
+func isSensitiveContent(content string) bool {
+	sensitivePatterns := []string{
+		"CERTIFICATE",
+		"PRIVATE KEY",
+		"SECRET",
+		"TOKEN",
+		"PASSWORD",
+		"AUTH",
+		"CRED",
+		"KEY",
+	}
+
+	lowerContent := strings.ToLower(content)
+	for _, pattern := range sensitivePatterns {
+		if strings.Contains(lowerContent, strings.ToLower(pattern)) {
+			return true
+		}
+	}
+	return false
+}
+
+// sanitizeContent is a general function to sanitize potentially sensitive content
+func sanitizeContent(content string) string {
+	if isSensitiveContent(content) {
+		// If content matches sensitive patterns, redact it
+		return "[SENSITIVE_CONTENT_REDACTED]"
+	}
+
+	// For very long content, truncate it
+	if len(content) > 100 {
+		return content[:50] + "..." + content[len(content)-10:] +
+			fmt.Sprintf(" [TRUNCATED, total length: %d]", len(content))
+	}
+
+	return content
+}
+
 type GitHubConfig struct {
 	IsEnterprise   bool
 	EnterpriseHost string
@@ -42,7 +241,7 @@ type SecretDetectorApp struct {
 	configs          map[string]*GitHubConfig
 	clients          map[string]*github.Client
 	valService       ValidationServiceConfig
-	logger           *log.Logger
+	logger           *SafeLogger
 	patterns         map[string]*regexp.Regexp
 	db               *db.DB            // Database field
 	testMode         bool              // Field to indicate test mode
@@ -53,19 +252,27 @@ type SecretDetectorApp struct {
 }
 
 func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger, testMode bool, fullFileAnalysis bool) *SecretDetectorApp {
+	defaultLogger := log.New(os.Stdout, "[SecretDetector] ", log.LstdFlags|log.Lshortfile)
 	if logger == nil {
-		logger = log.New(os.Stdout, "[SecretDetector] ", log.LstdFlags|log.Lshortfile)
+		logger = defaultLogger
 	}
+
+	// Create safe logger with appropriate level
+	logLevel := "info"
+	if val := os.Getenv("LOG_LEVEL"); val != "" {
+		logLevel = strings.ToLower(val)
+	}
+	safeLogger := NewSafeLogger(logger, logLevel)
 
 	// Check if we're in mock files mode
 	mockFilesMode := os.Getenv("MOCK_FILES_MODE") == "true"
 	if mockFilesMode {
-		logger.Printf("Starting in MOCK FILES MODE - will use local mock file contents")
+		safeLogger.Info("Starting in MOCK FILES MODE - will use local mock file contents")
 	}
 
 	patterns, err := loadPatterns("/app/config/config.json")
 	if err != nil {
-		logger.Printf("Warning: Failed to load patterns: %v", err)
+		safeLogger.Warn("Failed to load patterns: %v", err)
 		// Initialize with empty patterns map to prevent nil pointer dereference
 		patterns = make(map[string]*regexp.Regexp)
 	}
@@ -85,20 +292,20 @@ func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger, testMod
 	retryDelay := time.Second * 5
 
 	for i := 0; i < maxRetries; i++ {
-		logger.Printf("Attempting to connect to database (attempt %d/%d)...", i+1, maxRetries)
+		safeLogger.Info("Attempting to connect to database (attempt %d/%d)...", i+1, maxRetries)
 
 		dbConn, err = db.NewDB(dbHost, dbPort, dbUser, dbPassword, dbName)
 		if err == nil {
-			logger.Printf("Successfully connected to database")
+			safeLogger.Info("Successfully connected to database")
 			break
 		}
 
-		logger.Printf("Warning: Failed to connect to database: %v. Retrying in %v...", err, retryDelay)
+		safeLogger.Warn("Failed to connect to database: %v. Retrying in %v...", err, retryDelay)
 		time.Sleep(retryDelay)
 	}
 
 	if dbConn == nil {
-		logger.Printf("Warning: All database connection attempts failed. App will run with limited functionality.")
+		safeLogger.Warn("All database connection attempts failed. App will run with limited functionality.")
 	}
 
 	app := &SecretDetectorApp{
@@ -108,7 +315,7 @@ func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger, testMod
 			Endpoint: validationEndpoint,
 			Timeout:  30 * time.Second,
 		},
-		logger:           logger,
+		logger:           safeLogger,
 		patterns:         patterns,
 		db:               dbConn,
 		testMode:         testMode,
@@ -164,24 +371,27 @@ OO8YFPZCZ+hQkvYPBYjOF0l2qF6KPqkzQgzxBK6xzmY1J9obtr7HwgZ0Ktbk43c8
 	app.mockFiles["cert.pem"] = sampleCert
 	app.mockFiles["config/credentials.json"] = sampleConfig
 
-	app.logger.Printf("Initialized %d mock files for testing", len(app.mockFiles))
-	for filename, content := range app.mockFiles {
-		app.logger.Printf("Mock file available: %s (length: %d)", filename, len(content))
+	app.logger.Info("Initialized %d mock files for testing", len(app.mockFiles))
+	for filename := range app.mockFiles {
+		app.logger.Debug("Mock file available: %s", filename)
 	}
 }
 
 // Method to add custom mock files
 func (app *SecretDetectorApp) AddMockFile(filename, content string) {
 	app.mockFiles[filename] = content
-	app.logger.Printf("Added mock file: %s", filename)
+	app.logger.Info("Added mock file: %s", filename)
 }
 
 func loadPatterns(configPath string) (map[string]*regexp.Regexp, error) {
-	log.Printf("Attempting to load patterns from: %s", configPath)
+	defaultLogger := log.New(log.Writer(), "[LoadPatterns] ", log.LstdFlags)
+	safeLogger := NewSafeLogger(defaultLogger, "info")
+
+	safeLogger.Info("Attempting to load patterns from: %s", configPath)
 
 	configFile, err := os.ReadFile(configPath)
 	if err != nil {
-		log.Printf("Error reading config file: %v", err)
+		safeLogger.Error("Error reading config file: %v", err)
 		return nil, fmt.Errorf("failed to read config file: %v", err)
 	}
 
@@ -189,21 +399,21 @@ func loadPatterns(configPath string) (map[string]*regexp.Regexp, error) {
 		Patterns map[string]string `json:"patterns"`
 	}
 	if err := json.Unmarshal(configFile, &config); err != nil {
-		log.Printf("Error unmarshaling config: %v", err)
+		safeLogger.Error("Error unmarshaling config: %v", err)
 		return nil, fmt.Errorf("failed to unmarshal config: %v", err)
 	}
 
-	log.Printf("Loaded patterns: %+v", config.Patterns)
+	safeLogger.Debug("Loaded %d patterns", len(config.Patterns))
 
 	patterns := make(map[string]*regexp.Regexp)
 	for name, pattern := range config.Patterns {
 		re, err := regexp.Compile(pattern)
 		if err != nil {
-			log.Printf("Error compiling pattern %s: %v", name, err)
+			safeLogger.Error("Error compiling pattern %s: %v", name, err)
 			return nil, fmt.Errorf("failed to compile pattern %s: %v", name, err)
 		}
 		patterns[name] = re
-		log.Printf("Successfully compiled pattern: %s", name)
+		safeLogger.Debug("Successfully compiled pattern: %s", name)
 	}
 
 	return patterns, nil
@@ -214,38 +424,37 @@ func (app *SecretDetectorApp) getFileContents(ctx context.Context, client *githu
 
 	// If we're in mock files mode, use mock files instead of calling GitHub API
 	if app.mockFilesMode {
-		app.logger.Printf("Using mock files for commit %s in %s/%s",
+		app.logger.Info("Using mock files for commit %s in %s/%s",
 			commit, repo.GetOwner().GetLogin(), repo.GetName())
 
 		var allContent strings.Builder
 
 		// Initialize mock files if needed
 		if len(app.mockFiles) == 0 {
-			app.logger.Printf("Mock files map is empty! Initializing...")
+			app.logger.Info("Mock files map is empty! Initializing...")
 			app.initializeMockFiles()
 		}
 
 		// Count available mock files
-		app.logger.Printf("Total mock files available: %d", len(app.mockFiles))
+		app.logger.Debug("Total mock files available: %d", len(app.mockFiles))
 
 		// In a real webhook, we'd filter by what files were actually modified
 		// But for testing, we'll use all mock files
 		fileList := make([]string, 0, len(app.mockFiles))
 		for filename := range app.mockFiles {
 			fileList = append(fileList, filename)
-			app.logger.Printf("Adding file to process: %s", filename)
+			app.logger.Debug("Adding file to process: %s", filename)
 		}
 
 		// Process each file
 		for _, filename := range fileList {
 			content, exists := app.mockFiles[filename]
 			if !exists {
-				app.logger.Printf("Skipping unknown mock file: %s", filename)
+				app.logger.Debug("Skipping unknown mock file: %s", filename)
 				continue
 			}
 
-			app.logger.Printf("Adding mock file content for: %s (length: %d)",
-				filename, len(content))
+			app.logger.Debug("Adding mock file: %s (length: %d)", filename, len(content))
 			allContent.WriteString(fmt.Sprintf("--- %s ---\n", filename))
 			allContent.WriteString(content)
 			allContent.WriteString("\n\n")
@@ -253,15 +462,15 @@ func (app *SecretDetectorApp) getFileContents(ctx context.Context, client *githu
 
 		result := allContent.String()
 		if len(result) == 0 {
-			app.logger.Printf("WARNING: Generated empty mock file content!")
+			app.logger.Warn("WARNING: Generated empty mock file content!")
 		} else {
-			app.logger.Printf("Generated mock file content (length: %d)", len(result))
+			app.logger.Debug("Generated mock file content (total length: %d)", len(result))
 		}
 
 		return result, nil
 	}
 
-	app.logger.Printf("Fetching full file contents for commit %s in %s/%s",
+	app.logger.Info("Fetching file contents for commit %s in %s/%s",
 		commit, repo.GetOwner().GetLogin(), repo.GetName())
 
 	// Get the commit details to identify all files
@@ -281,13 +490,13 @@ func (app *SecretDetectorApp) getFileContents(ctx context.Context, client *githu
 
 	// Track how many files we're analyzing for logging
 	fileCount := len(commitObj.Files)
-	app.logger.Printf("Found %d files in commit", fileCount)
+	app.logger.Info("Found %d files in commit", fileCount)
 
 	// Process each file in the commit
 	for i, file := range commitObj.Files {
 		// Skip deleted files
 		if file.GetStatus() == "removed" {
-			app.logger.Printf("Skipping deleted file: %s", file.GetFilename())
+			app.logger.Debug("Skipping deleted file: %s", file.GetFilename())
 			continue
 		}
 
@@ -303,13 +512,13 @@ func (app *SecretDetectorApp) getFileContents(ctx context.Context, client *githu
 		)
 
 		if err != nil {
-			app.logger.Printf("Warning: Failed to get content for file %s: %v", file.GetFilename(), err)
+			app.logger.Warn("Failed to get content for file %s: %v", file.GetFilename(), err)
 			continue
 		}
 
 		// fileContent can be a single file or a directory
 		if fileContent == nil {
-			app.logger.Printf("Skipping directory or empty file: %s", file.GetFilename())
+			app.logger.Debug("Skipping directory or empty file: %s", file.GetFilename())
 			continue
 		}
 
@@ -322,7 +531,7 @@ func (app *SecretDetectorApp) getFileContents(ctx context.Context, client *githu
 			if fileContent.Content != nil {
 				content, err = fileContent.GetContent()
 				if err != nil {
-					app.logger.Printf("Warning: Failed to decode content for file %s: %v", file.GetFilename(), err)
+					app.logger.Warn("Failed to decode content for file %s: %v", file.GetFilename(), err)
 					continue
 				}
 			} else {
@@ -331,30 +540,30 @@ func (app *SecretDetectorApp) getFileContents(ctx context.Context, client *githu
 				if fileContent.GetDownloadURL() != "" {
 					req, err := http.NewRequestWithContext(ctx, "GET", fileContent.GetDownloadURL(), nil)
 					if err != nil {
-						app.logger.Printf("Warning: Failed to create request for file %s: %v", file.GetFilename(), err)
+						app.logger.Warn("Failed to create request for file %s: %v", file.GetFilename(), err)
 						continue
 					}
 
 					resp, err := client.Client().Do(req)
 					if err != nil {
-						app.logger.Printf("Warning: Failed to download file %s: %v", file.GetFilename(), err)
+						app.logger.Warn("Failed to download file %s: %v", file.GetFilename(), err)
 						continue
 					}
 					defer resp.Body.Close()
 
 					bodyBytes, err := io.ReadAll(resp.Body)
 					if err != nil {
-						app.logger.Printf("Warning: Failed to read file content for %s: %v", file.GetFilename(), err)
+						app.logger.Warn("Failed to read file content for %s: %v", file.GetFilename(), err)
 						continue
 					}
 					content = string(bodyBytes)
 				} else {
-					app.logger.Printf("Warning: No content available for file %s", file.GetFilename())
+					app.logger.Warn("No content available for file %s", file.GetFilename())
 					continue
 				}
 			}
 
-			app.logger.Printf("Successfully fetched content for file %d/%d: %s (size: %d bytes)",
+			app.logger.Debug("Successfully fetched file %d/%d: %s (size: %d bytes)",
 				i+1, fileCount, file.GetFilename(), len(content))
 
 			// Add file header and content to our combined content
@@ -362,7 +571,7 @@ func (app *SecretDetectorApp) getFileContents(ctx context.Context, client *githu
 			allContent.WriteString(content)
 			allContent.WriteString("\n\n")
 		} else {
-			app.logger.Printf("Skipping non-file content type: %s (%s)", file.GetFilename(), fileContent.GetType())
+			app.logger.Debug("Skipping non-file content type: %s (%s)", file.GetFilename(), fileContent.GetType())
 		}
 	}
 
@@ -545,18 +754,12 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 
 	// Special case for test+mock mode with full file analysis
 	if app.testMode && app.mockFilesMode && app.fullFileAnalysis {
-		app.logger.Printf("Running in TEST+MOCK+FULL_FILE_ANALYSIS mode - using mock files")
+		app.logger.Info("Running in TEST+MOCK+FULL_FILE_ANALYSIS mode - using mock files")
 
 		// First, make sure mock files are initialized
 		if len(app.mockFiles) == 0 {
-			app.logger.Printf("Mock files not initialized, initializing now...")
+			app.logger.Info("Mock files not initialized, initializing now...")
 			app.initializeMockFiles()
-		}
-
-		// Log available mock files to verify they exist
-		app.logger.Printf("Available mock files: %d", len(app.mockFiles))
-		for filename := range app.mockFiles {
-			app.logger.Printf("  - %s", filename)
 		}
 
 		// Use commit messages for validation
@@ -573,16 +776,16 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 		// Get the mock file contents
 		fileContent, err := app.getFileContents(ctx, client, repository, head)
 		if err != nil {
-			app.logger.Printf("Warning: Error getting mock file contents: %v", err)
+			app.logger.Warn("Error getting mock file contents: %v", err)
 		} else if fileContent != "" {
-			app.logger.Printf("Successfully retrieved mock file contents (length: %d)", len(fileContent))
+			app.logger.Debug("Retrieved mock file contents (length: %d)", len(fileContent))
 			contentToScan = append(contentToScan, fileContent)
 		} else {
-			app.logger.Printf("Error: Retrieved empty mock file contents")
+			app.logger.Warn("Retrieved empty mock file contents")
 		}
 	} else if app.testMode {
 		// Regular test mode - skip API retrieval
-		app.logger.Printf("Running in test mode - skipping API retrieval")
+		app.logger.Info("Running in test mode - skipping API retrieval")
 
 		// Use the commit messages for validation
 		for _, commit := range event.Commits {
@@ -591,14 +794,14 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 
 		// If we have any stored patches, use them
 		if len(app.testPatches) > 0 {
-			app.logger.Printf("Found %d patches from test mode", len(app.testPatches))
+			app.logger.Debug("Found %d patches from test mode", len(app.testPatches))
 			contentToScan = append(contentToScan, app.testPatches...)
 		}
 	} else {
 		// Normal mode - either get diff or full file content based on configuration
 		if app.fullFileAnalysis {
 			// Full file analysis mode - fetch the content of each modified file
-			app.logger.Printf("Running in full file analysis mode - fetching complete file contents")
+			app.logger.Info("Running in full file analysis mode - fetching complete file contents")
 
 			// Get each commit and fetch its file contents
 			for _, commit := range event.Commits {
@@ -609,7 +812,7 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 				}, commitSHA)
 
 				if err != nil {
-					app.logger.Printf("Warning: Error fetching file contents for commit %s: %v", commitSHA, err)
+					app.logger.Warn("Error fetching file contents for commit %s: %v", commitSHA, err)
 					continue
 				}
 
@@ -620,7 +823,7 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 			}
 		} else {
 			// Diff-only mode (original behavior)
-			app.logger.Printf("Running in diff-only mode - fetching git diff")
+			app.logger.Info("Running in diff-only mode - fetching git diff")
 			diff, err := app.getDiff(ctx, client, &github.Repository{Owner: repo.Owner, Name: repo.Name}, base, head)
 			if err != nil {
 				return fmt.Errorf("failed to get diff: %v", err)
@@ -636,12 +839,11 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 
 	// Combine all content with newlines
 	combinedContent := strings.Join(contentToScan, "\n")
-	app.logger.Printf("Content to scan (length: %d)", len(combinedContent))
-	if len(combinedContent) < 500 {
-		app.logger.Printf("Full content to scan: %s", combinedContent)
-	} else {
-		app.logger.Printf("Content to scan (first 500 chars): %s...", combinedContent[:500])
-	}
+	app.logger.Info("Content to scan (length: %d)", len(combinedContent))
+	// Do not log content itself, only metadata
+	app.logger.Debug("Content contains %d files, %d lines",
+		strings.Count(combinedContent, "---"),
+		strings.Count(combinedContent, "\n"))
 
 	findings, err := app.validateContent(ctx, combinedContent)
 	if err != nil {
@@ -656,14 +858,16 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 
 	// Log findings to database
 	if len(findings) > 0 {
-		app.logger.Printf("Found %d findings", len(findings))
+		app.logger.Info("Found %d findings", len(findings))
 		for i, finding := range findings {
-			app.logger.Printf("Finding %d: Type=%s, Valid=%t, Message=%s",
-				i, finding.Type, finding.IsValid, finding.Message)
+			app.logger.Info("Finding %d: Type=%s, Valid=%t", i, finding.Type, finding.IsValid)
+
+			// Only log the finding message, not the actual secret
+			app.logger.Debug("Finding %d message: %s", i, finding.Message)
 
 			// Only block if the secret is valid
 			if finding.IsValid {
-				app.logger.Printf("BLOCKING: Found valid %s in commit", finding.Type)
+				app.logger.Warn("BLOCKING: Found valid %s in commit", finding.Type)
 
 				// Log to database
 				repoModel := &models.Repository{
@@ -682,10 +886,10 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 				)
 
 				if err != nil {
-					app.logger.Printf("Error recording detection: %v", err)
+					app.logger.Error("Error recording detection: %v", err)
 				}
 			} else {
-				app.logger.Printf("ALLOWING: Found invalid/test %s in commit", finding.Type)
+				app.logger.Info("ALLOWING: Found invalid/test %s in commit", finding.Type)
 
 				// Log to database with is_blocked=false
 				repoModel := &models.Repository{
@@ -707,17 +911,17 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 				)
 
 				if err != nil {
-					app.logger.Printf("Error recording detection: %v", err)
+					app.logger.Error("Error recording detection: %v", err)
 				}
 			}
 		}
 	} else {
-		app.logger.Printf("No findings detected")
+		app.logger.Info("No findings detected")
 	}
 
 	// In test mode, we can skip the create status call as well
 	if app.testMode {
-		app.logger.Printf("Test mode: Skipping GitHub status update")
+		app.logger.Info("Test mode: Skipping GitHub status update")
 		return nil
 	}
 
@@ -735,18 +939,19 @@ func (app *SecretDetectorApp) HandleWebhook(w http.ResponseWriter, r *http.Reque
 
 	config, exists := app.configs[host]
 	if !exists {
-		app.logger.Printf("Unknown GitHub instance: %s", host)
+		app.logger.Warn("Unknown GitHub instance: %s", host)
 		http.Error(w, "Unknown GitHub instance", http.StatusBadRequest)
 		return
 	}
 
-	// Debug logging to troubleshoot signature validation
-	app.logger.Printf("Received webhook with signature: %s", r.Header.Get("X-Hub-Signature"))
+	// Get the signature from the request - log safely
+	receivedSig := r.Header.Get("X-Hub-Signature")
+	app.logger.LogSignature("Received webhook with signature", receivedSig)
 
 	// Read the request body
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		app.logger.Printf("Error reading request body: %v", err)
+		app.logger.Error("Error reading request body: %v", err)
 		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
@@ -754,42 +959,35 @@ func (app *SecretDetectorApp) HandleWebhook(w http.ResponseWriter, r *http.Reque
 	// Restore the body for later use
 	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
-	// Log the first 100 bytes of the payload for debugging
-	payloadPrefix := string(bodyBytes)
-	if len(payloadPrefix) > 100 {
-		payloadPrefix = payloadPrefix[:100] + "..."
-	}
-	app.logger.Printf("Received payload (first 100 bytes): %s", payloadPrefix)
+	// Log payload safely
+	app.logger.LogPayload("Received payload", string(bodyBytes))
 
 	// Calculate signature manually to compare with received signature
 	mac := hmac.New(sha1.New, []byte(config.WebhookSecret))
 	mac.Write(bodyBytes)
 	expectedSig := "sha1=" + hex.EncodeToString(mac.Sum(nil))
 
-	// Get the signature from the request
-	receivedSig := r.Header.Get("X-Hub-Signature")
-
-	// Log both signatures for comparison
-	app.logger.Printf("Expected signature: %s", expectedSig)
-	app.logger.Printf("Received signature: %s", receivedSig)
+	// Log both signatures for comparison - safely
+	app.logger.LogSignature("Expected signature", expectedSig)
+	app.logger.LogSignature("Received signature", receivedSig)
 
 	// Skip signature validation if in test mode
 	if !app.testMode {
 		// Do a manual signature comparison only if not in test mode
 		if receivedSig == "" {
-			app.logger.Printf("No signature received")
+			app.logger.Warn("No signature received")
 			http.Error(w, "Missing signature", http.StatusBadRequest)
 			return
 		}
 
 		// Allow either exact string match or hmac.Equal()
 		if expectedSig != receivedSig && !hmac.Equal([]byte(expectedSig), []byte(receivedSig)) {
-			app.logger.Printf("Signature validation failed: %s != %s", expectedSig, receivedSig)
+			app.logger.Warn("Signature validation failed")
 			http.Error(w, "Invalid webhook payload", http.StatusBadRequest)
 			return
 		}
 	} else {
-		app.logger.Printf("TEST MODE: Bypassing signature validation")
+		app.logger.Info("TEST MODE: Bypassing signature validation")
 	}
 
 	// Clear any previous test patches
@@ -800,20 +998,20 @@ func (app *SecretDetectorApp) HandleWebhook(w http.ResponseWriter, r *http.Reque
 		var rawPayload map[string]interface{}
 		if err := json.Unmarshal(bodyBytes, &rawPayload); err == nil {
 			if commits, ok := rawPayload["commits"].([]interface{}); ok {
-				app.logger.Printf("Test mode: Found %d commits in raw payload", len(commits))
+				app.logger.Debug("Test mode: Found %d commits in raw payload", len(commits))
 
 				// Iterate through commits to find patches
 				for i, c := range commits {
 					if commitObj, ok := c.(map[string]interface{}); ok {
 						// Try to extract patch data
 						if patch, ok := commitObj["patch"].(string); ok && patch != "" {
-							app.logger.Printf("Test mode: Found patch data in commit %d", i)
+							app.logger.Debug("Test mode: Found patch data in commit %d", i)
 							// Store patch data for later use
 							app.testPatches = append(app.testPatches, patch)
 
 							// If we have a message, add it to the commit object
 							if message, ok := commitObj["message"].(string); ok {
-								app.logger.Printf("Test mode: Adding patch data to commit with message: %s",
+								app.logger.Debug("Test mode: Adding patch data to commit with message: %s",
 									truncateString(message, 50))
 							}
 						}
@@ -821,7 +1019,7 @@ func (app *SecretDetectorApp) HandleWebhook(w http.ResponseWriter, r *http.Reque
 				}
 			}
 		} else {
-			app.logger.Printf("Test mode: Failed to parse raw payload as JSON: %v", err)
+			app.logger.Debug("Test mode: Failed to parse raw payload as JSON: %v", err)
 		}
 	}
 
@@ -831,7 +1029,7 @@ func (app *SecretDetectorApp) HandleWebhook(w http.ResponseWriter, r *http.Reque
 	// Parse the webhook event
 	event, err := github.ParseWebHook(github.WebHookType(r), bodyBytes)
 	if err != nil {
-		app.logger.Printf("Failed to parse webhook: %v", err)
+		app.logger.Error("Failed to parse webhook: %v", err)
 		http.Error(w, "Failed to parse webhook", http.StatusBadRequest)
 		return
 	}
@@ -841,12 +1039,12 @@ func (app *SecretDetectorApp) HandleWebhook(w http.ResponseWriter, r *http.Reque
 	switch e := event.(type) {
 	case *github.PushEvent:
 		if err := app.handlePushEvent(ctx, client, e); err != nil {
-			app.logger.Printf("Failed to handle push event: %v", err)
+			app.logger.Error("Failed to handle push event: %v", err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
 	default:
-		app.logger.Printf("Unsupported event type: %s", github.WebHookType(r))
+		app.logger.Info("Unsupported event type: %s", github.WebHookType(r))
 		http.Error(w, "Unsupported event type", http.StatusBadRequest)
 		return
 	}
@@ -864,16 +1062,16 @@ func (app *SecretDetectorApp) HandleValidate(w http.ResponseWriter, r *http.Requ
 		Content string `json:"content"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		app.logger.Printf("Error decoding request: %v", err)
+		app.logger.Error("Error decoding request: %v", err)
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
-	app.logger.Printf("Received content to validate. Length: %d", len(req.Content))
+	app.logger.Info("Received content to validate. Length: %d", len(req.Content))
 
 	// Handle empty content
 	if strings.TrimSpace(req.Content) == "" {
-		app.logger.Printf("Empty content received")
+		app.logger.Info("Empty content received")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(models.DetectionResponse{
 			Findings: []models.SecretFinding{},
@@ -885,7 +1083,7 @@ func (app *SecretDetectorApp) HandleValidate(w http.ResponseWriter, r *http.Requ
 	// Validate the content using validation service
 	findings, err := app.validateContent(r.Context(), req.Content)
 	if err != nil {
-		app.logger.Printf("Error validating content: %v", err)
+		app.logger.Error("Error validating content: %v", err)
 		http.Error(w, fmt.Sprintf("Error validating content: %v", err), http.StatusInternalServerError)
 		return
 	}
@@ -938,7 +1136,22 @@ func getEnvInt64(key string, defaultVal int64) int64 {
 }
 
 func main() {
-	logger := log.New(os.Stdout, "[SecretDetector] ", log.LstdFlags|log.Lshortfile)
+	// Configure log level from environment
+	logLevel := os.Getenv("LOG_LEVEL")
+	if logLevel == "" {
+		// Default to info in production, debug in development
+		if os.Getenv("APP_ENV") == "production" {
+			logLevel = "info"
+		} else {
+			logLevel = "debug"
+		}
+	}
+
+	// Create standard logger
+	stdLogger := log.New(os.Stdout, "[SecretDetector] ", log.LstdFlags|log.Lshortfile)
+
+	// Create our safe logger
+	logger := NewSafeLogger(stdLogger, logLevel)
 
 	// Get validation service URL from environment or use default
 	validationServiceURL := os.Getenv("VALIDATION_SERVICE_URL")
@@ -949,35 +1162,35 @@ func main() {
 	// Check if we're in test mode
 	testMode := os.Getenv("TEST_MODE") == "true"
 	if testMode {
-		logger.Printf("Starting in TEST MODE - GitHub API calls will be skipped")
+		logger.Info("Starting in TEST MODE - GitHub API calls will be skipped")
 	}
 
 	// Check if we should use full file analysis
 	fullFileAnalysis := os.Getenv("FULL_FILE_ANALYSIS") == "true"
 	if fullFileAnalysis {
-		logger.Printf("Starting with FULL FILE ANALYSIS enabled - will fetch complete file contents")
+		logger.Info("Starting with FULL FILE ANALYSIS enabled - will fetch complete file contents")
 	} else {
-		logger.Printf("Starting with diff-only analysis - will only examine git diffs")
+		logger.Info("Starting with diff-only analysis - will only examine git diffs")
 	}
 
 	// Check if we're in mock files mode
 	mockFilesMode := os.Getenv("MOCK_FILES_MODE") == "true"
 	if mockFilesMode {
-		logger.Printf("Starting with MOCK FILES MODE enabled - will use local mock files instead of GitHub API")
+		logger.Info("Starting with MOCK FILES MODE enabled - will use local mock files instead of GitHub API")
 	}
 
-	app := NewSecretDetectorApp(validationServiceURL, logger, testMode, fullFileAnalysis)
+	app := NewSecretDetectorApp(validationServiceURL, stdLogger, testMode, fullFileAnalysis)
 
 	// Load GitHub.com private key
 	privateKey, err := os.ReadFile("/app/keys/github.pem")
 	if err != nil {
-		logger.Printf("Warning: Failed to read private key: %v", err)
+		logger.Warn("Failed to read private key: %v", err)
 		privateKey = []byte("dummy-key-for-testing") // Allow app to start for testing
 	}
 
 	webhookSecret := os.Getenv("GITHUB_WEBHOOK_SECRET")
 	if webhookSecret == "" {
-		logger.Printf("Warning: GITHUB_WEBHOOK_SECRET not set, using default test secret")
+		logger.Warn("GITHUB_WEBHOOK_SECRET not set, using default test secret")
 		webhookSecret = "dummy-secret-for-testing" // Allow app to start for testing
 	}
 
@@ -993,7 +1206,7 @@ func main() {
 		WebhookSecret:  webhookSecret,
 	})
 	if err != nil {
-		logger.Printf("Warning: Failed to add GitHub.com instance: %v", err)
+		logger.Warn("Failed to add GitHub.com instance: %v", err)
 	}
 
 	// Add Enterprise instance only if ALL required config is present
@@ -1002,7 +1215,7 @@ func main() {
 	if enterpriseHost != "" && enterpriseSecret != "" {
 		enterpriseKey, err := os.ReadFile("/app/keys/enterprise.pem")
 		if err != nil {
-			logger.Printf("Warning: Skipping enterprise setup - Failed to read enterprise key: %v", err)
+			logger.Warn("Skipping enterprise setup - Failed to read enterprise key: %v", err)
 		} else {
 			enterpriseAppID := getEnvInt64("GITHUB_ENTERPRISE_APP_ID", 0)
 			enterpriseInstallID := getEnvInt64("GITHUB_ENTERPRISE_INSTALLATION_ID", 0)
@@ -1017,10 +1230,10 @@ func main() {
 					WebhookSecret:  enterpriseSecret,
 				})
 				if err != nil {
-					logger.Printf("Warning: Failed to add Enterprise instance: %v", err)
+					logger.Warn("Failed to add Enterprise instance: %v", err)
 				}
 			} else {
-				logger.Printf("Warning: Skipping enterprise setup - Missing enterprise app ID or installation ID")
+				logger.Warn("Skipping enterprise setup - Missing enterprise app ID or installation ID")
 			}
 		}
 	}
@@ -1029,8 +1242,9 @@ func main() {
 	http.HandleFunc("/validate", app.HandleValidate)
 
 	listenAddr := ":8080"
-	logger.Printf("Starting server on %s", listenAddr)
+	logger.Info("Starting server on %s", listenAddr)
 	if err := http.ListenAndServe(listenAddr, nil); err != nil {
-		logger.Fatalf("Server failed: %v", err)
+		logger.Error("Server failed: %v", err)
+		os.Exit(1)
 	}
 }
