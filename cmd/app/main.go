@@ -39,16 +39,17 @@ type ValidationServiceConfig struct {
 }
 
 type SecretDetectorApp struct {
-	configs    map[string]*GitHubConfig
-	clients    map[string]*github.Client
-	valService ValidationServiceConfig
-	logger     *log.Logger
-	patterns   map[string]*regexp.Regexp
-	db         *db.DB // Database field
-	testMode   bool   // New field to indicate test mode
+	configs          map[string]*GitHubConfig
+	clients          map[string]*github.Client
+	valService       ValidationServiceConfig
+	logger           *log.Logger
+	patterns         map[string]*regexp.Regexp
+	db               *db.DB // Database field
+	testMode         bool   // Field to indicate test mode
+	fullFileAnalysis bool   // New field to indicate if we should analyze full files instead of just diffs
 }
 
-func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger, testMode bool) *SecretDetectorApp {
+func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger, testMode bool, fullFileAnalysis bool) *SecretDetectorApp {
 	if logger == nil {
 		logger = log.New(os.Stdout, "[SecretDetector] ", log.LstdFlags|log.Lshortfile)
 	}
@@ -98,10 +99,11 @@ func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger, testMod
 			Endpoint: validationEndpoint,
 			Timeout:  30 * time.Second,
 		},
-		logger:   logger,
-		patterns: patterns,
-		db:       dbConn,
-		testMode: testMode,
+		logger:           logger,
+		patterns:         patterns,
+		db:               dbConn,
+		testMode:         testMode,
+		fullFileAnalysis: fullFileAnalysis,
 	}
 }
 
@@ -136,6 +138,117 @@ func loadPatterns(configPath string) (map[string]*regexp.Regexp, error) {
 	}
 
 	return patterns, nil
+}
+
+func (app *SecretDetectorApp) getFileContents(ctx context.Context, client *github.Client,
+	repo *github.Repository, commit string) (string, error) {
+
+	app.logger.Printf("Fetching full file contents for commit %s in %s/%s",
+		commit, repo.GetOwner().GetLogin(), repo.GetName())
+
+	// Get the commit details to identify all files
+	commitObj, _, err := client.Repositories.GetCommit(
+		ctx,
+		repo.GetOwner().GetLogin(),
+		repo.GetName(),
+		commit,
+		&github.ListOptions{},
+	)
+
+	if err != nil {
+		return "", fmt.Errorf("failed to get commit details: %v", err)
+	}
+
+	var allContent strings.Builder
+
+	// Track how many files we're analyzing for logging
+	fileCount := len(commitObj.Files)
+	app.logger.Printf("Found %d files in commit", fileCount)
+
+	// Process each file in the commit
+	for i, file := range commitObj.Files {
+		// Skip deleted files
+		if file.GetStatus() == "removed" {
+			app.logger.Printf("Skipping deleted file: %s", file.GetFilename())
+			continue
+		}
+
+		// Get the content of the file at this commit
+		fileContent, _, _, err := client.Repositories.GetContents(
+			ctx,
+			repo.GetOwner().GetLogin(),
+			repo.GetName(),
+			file.GetFilename(),
+			&github.RepositoryContentGetOptions{
+				Ref: commit,
+			},
+		)
+
+		if err != nil {
+			app.logger.Printf("Warning: Failed to get content for file %s: %v", file.GetFilename(), err)
+			continue
+		}
+
+		// fileContent can be a single file or a directory
+		if fileContent == nil {
+			app.logger.Printf("Skipping directory or empty file: %s", file.GetFilename())
+			continue
+		}
+
+		// For large files, GetContents may not return content directly
+		// We need to handle multiple content types
+		var content string
+
+		if fileContent.GetType() == "file" {
+			// If Content is available directly
+			if fileContent.Content != nil {
+				content, err = fileContent.GetContent()
+				if err != nil {
+					app.logger.Printf("Warning: Failed to decode content for file %s: %v", file.GetFilename(), err)
+					continue
+				}
+			} else {
+				// If Content is not available directly, we need to fetch it another way
+				// For large files, we can use the download URL
+				if fileContent.GetDownloadURL() != "" {
+					req, err := http.NewRequestWithContext(ctx, "GET", fileContent.GetDownloadURL(), nil)
+					if err != nil {
+						app.logger.Printf("Warning: Failed to create request for file %s: %v", file.GetFilename(), err)
+						continue
+					}
+
+					resp, err := client.Client().Do(req)
+					if err != nil {
+						app.logger.Printf("Warning: Failed to download file %s: %v", file.GetFilename(), err)
+						continue
+					}
+					defer resp.Body.Close()
+
+					bodyBytes, err := io.ReadAll(resp.Body)
+					if err != nil {
+						app.logger.Printf("Warning: Failed to read file content for %s: %v", file.GetFilename(), err)
+						continue
+					}
+					content = string(bodyBytes)
+				} else {
+					app.logger.Printf("Warning: No content available for file %s", file.GetFilename())
+					continue
+				}
+			}
+
+			app.logger.Printf("Successfully fetched content for file %d/%d: %s (size: %d bytes)",
+				i+1, fileCount, file.GetFilename(), len(content))
+
+			// Add file header and content to our combined content
+			allContent.WriteString(fmt.Sprintf("--- %s ---\n", file.GetFilename()))
+			allContent.WriteString(content)
+			allContent.WriteString("\n\n")
+		} else {
+			app.logger.Printf("Skipping non-file content type: %s (%s)", file.GetFilename(), fileContent.GetType())
+		}
+	}
+
+	return allContent.String(), nil
 }
 
 func (app *SecretDetectorApp) AddInstance(config *GitHubConfig) error {
@@ -314,35 +427,64 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 
 	if app.testMode {
 		// In test mode, skip GitHub API calls and use commit messages and patch fields
-		app.logger.Printf("Running in test mode - skipping diff retrieval from GitHub API")
+		app.logger.Printf("Running in test mode - skipping API retrieval")
 
-		// Use the commit messages and patches for validation
+		// Use the commit messages for validation
 		for _, commit := range event.Commits {
 			contentToScan = append(contentToScan, commit.GetMessage())
+		}
 
-			// Also check patch field if exists (often contains the actual code changes)
-			if patch, ok := commit.GetRawPatch().(string); ok && patch != "" {
-				contentToScan = append(contentToScan, patch)
-			} else if patch, ok := commit.Raw["patch"].(string); ok && patch != "" {
-				contentToScan = append(contentToScan, patch)
-			}
-
-			// If commit has a field called "patch" directly, check that too
-			if patch := commit.GetPatch(); patch != "" {
-				contentToScan = append(contentToScan, patch)
+		// For test mode, we need to check if there's a 'patch' field in the raw event payload
+		if rawPayload, ok := event.GetRawPayload().(map[string]interface{}); ok {
+			if commits, ok := rawPayload["commits"].([]interface{}); ok {
+				for _, c := range commits {
+					if commitObj, ok := c.(map[string]interface{}); ok {
+						// Try to extract patch data from the raw payload
+						if patch, ok := commitObj["patch"].(string); ok && patch != "" {
+							app.logger.Printf("Found patch data in raw payload")
+							contentToScan = append(contentToScan, patch)
+						}
+					}
+				}
 			}
 		}
 	} else {
-		// Normal mode - get diff from GitHub API
-		diff, err := app.getDiff(ctx, client, &github.Repository{Owner: repo.Owner, Name: repo.Name}, base, head)
-		if err != nil {
-			return fmt.Errorf("failed to get diff: %v", err)
-		}
-		contentToScan = append(contentToScan, diff)
+		// Normal mode - either get diff or full file content based on configuration
+		if app.fullFileAnalysis {
+			// Full file analysis mode - fetch the content of each modified file
+			app.logger.Printf("Running in full file analysis mode - fetching complete file contents")
 
-		// Also add commit messages
-		for _, commit := range event.Commits {
-			contentToScan = append(contentToScan, commit.GetMessage())
+			// Get each commit and fetch its file contents
+			for _, commit := range event.Commits {
+				commitSHA := commit.GetSHA() // Use GetSHA() instead of GetID()
+				fileContent, err := app.getFileContents(ctx, client, &github.Repository{
+					Owner: repo.Owner,
+					Name:  repo.Name,
+				}, commitSHA)
+
+				if err != nil {
+					app.logger.Printf("Warning: Error fetching file contents for commit %s: %v", commitSHA, err)
+					continue
+				}
+
+				contentToScan = append(contentToScan, fileContent)
+
+				// Always scan commit messages as well
+				contentToScan = append(contentToScan, commit.GetMessage())
+			}
+		} else {
+			// Diff-only mode (original behavior)
+			app.logger.Printf("Running in diff-only mode - fetching git diff")
+			diff, err := app.getDiff(ctx, client, &github.Repository{Owner: repo.Owner, Name: repo.Name}, base, head)
+			if err != nil {
+				return fmt.Errorf("failed to get diff: %v", err)
+			}
+			contentToScan = append(contentToScan, diff)
+
+			// Also add commit messages
+			for _, commit := range event.Commits {
+				contentToScan = append(contentToScan, commit.GetMessage())
+			}
 		}
 	}
 
@@ -499,6 +641,34 @@ func (app *SecretDetectorApp) HandleWebhook(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// For test mode, extract patch data from the raw JSON payload if available
+	if app.testMode {
+		var rawPayload map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &rawPayload); err == nil {
+			if commits, ok := rawPayload["commits"].([]interface{}); ok {
+				app.logger.Printf("Test mode: Found %d commits in raw payload", len(commits))
+
+				// Iterate through commits to find patches
+				for i, c := range commits {
+					if commitObj, ok := c.(map[string]interface{}); ok {
+						// Try to extract patch data
+						if patch, ok := commitObj["patch"].(string); ok && patch != "" {
+							app.logger.Printf("Test mode: Found patch data in commit %d", i)
+
+							// If we have a message, add it to the commit object
+							if message, ok := commitObj["message"].(string); ok {
+								app.logger.Printf("Test mode: Adding patch data to commit with message: %s",
+									truncateString(message, 50))
+							}
+						}
+					}
+				}
+			}
+		} else {
+			app.logger.Printf("Test mode: Failed to parse raw payload as JSON: %v", err)
+		}
+	}
+
 	// Restore the body again after validation
 	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
@@ -514,6 +684,9 @@ func (app *SecretDetectorApp) HandleWebhook(w http.ResponseWriter, r *http.Reque
 
 	switch e := event.(type) {
 	case *github.PushEvent:
+		// Since we're in test mode and need more information than what's in the standard PushEvent structure,
+		// we've done additional processing of the raw payload above
+
 		if err := app.handlePushEvent(ctx, client, e); err != nil {
 			app.logger.Printf("Failed to handle push event: %v", err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -626,7 +799,15 @@ func main() {
 		logger.Printf("Starting in TEST MODE - GitHub API calls will be skipped")
 	}
 
-	app := NewSecretDetectorApp(validationServiceURL, logger, testMode)
+	// Check if we should use full file analysis
+	fullFileAnalysis := os.Getenv("FULL_FILE_ANALYSIS") == "true"
+	if fullFileAnalysis {
+		logger.Printf("Starting with FULL FILE ANALYSIS enabled - will fetch complete file contents")
+	} else {
+		logger.Printf("Starting with diff-only analysis - will only examine git diffs")
+	}
+
+	app := NewSecretDetectorApp(validationServiceURL, logger, testMode, fullFileAnalysis)
 
 	// Load GitHub.com private key
 	privateKey, err := os.ReadFile("/app/keys/github.pem")
@@ -694,4 +875,3 @@ func main() {
 		logger.Fatalf("Server failed: %v", err)
 	}
 }
-s

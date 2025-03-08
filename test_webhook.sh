@@ -41,13 +41,32 @@ EOF
 
 echo "Created webhook payload with embedded certificate in patch field"
 
+# Directly check the server's code to understand how it calculates the signature
+echo "Examining how server calculates signature..."
+# Use docker exec to check how the secret is set in the app
+ACTUAL_SECRET=$(docker-compose exec -T github-app sh -c 'echo $GITHUB_WEBHOOK_SECRET')
+echo "Actual webhook secret in container: $ACTUAL_SECRET"
+
 # Read the payload from file to ensure it's preserved exactly
 PAYLOAD=$(cat "$PAYLOAD_FILE")
 
 # Calculate signature using the webhook secret
+# Important: The server uses raw HMAC calculation, so we need to match that exactly
 echo "Calculating signature..."
-SIGNATURE=$(echo -n "$PAYLOAD" | openssl dgst -sha1 -hmac "$WEBHOOK_SECRET" | sed 's/^.* //')
-echo "Calculated signature: sha1=$SIGNATURE"
+# Try multiple signature calculation methods to match what the server expects
+SIGNATURE1=$(echo -n "$PAYLOAD" | openssl dgst -sha1 -hmac "$WEBHOOK_SECRET" | sed 's/^.* //')
+SIGNATURE2=$(echo -n "$PAYLOAD" | openssl sha1 -hmac "$WEBHOOK_SECRET" | sed 's/^.* //')
+
+# This binary conversion is closer to what Go's crypto/hmac package does
+SIGNATURE3=$(echo -n "$PAYLOAD" | openssl dgst -binary -sha1 -hmac "$WEBHOOK_SECRET" | xxd -p)
+
+echo "Method 1 signature: sha1=$SIGNATURE1"
+echo "Method 2 signature: sha1=$SIGNATURE2"
+echo "Method 3 signature: sha1=$SIGNATURE3"
+
+# Try signature from method 3 (binary conversion) - most likely to match Go's implementation
+SIGNATURE="$SIGNATURE3"
+echo "Using signature: sha1=$SIGNATURE"
 
 # Send webhook to server
 echo "Sending webhook to server..."
@@ -57,6 +76,20 @@ RESPONSE=$(curl -v -X POST \
   -H "X-GitHub-Event: push" \
   -H "X-Hub-Signature: sha1=$SIGNATURE" \
   -d @"$PAYLOAD_FILE")
+
+# If that fails, try signature method 1 (standard openssl output)
+if [[ "$RESPONSE" == *"Invalid webhook payload"* ]]; then
+  echo "First signature attempt failed, trying method 1..."
+  SIGNATURE="$SIGNATURE1"
+  echo "Using signature: sha1=$SIGNATURE"
+  
+  RESPONSE=$(curl -v -X POST \
+    "http://localhost:3000/webhook" \
+    -H "Content-Type: application/json" \
+    -H "X-GitHub-Event: push" \
+    -H "X-Hub-Signature: sha1=$SIGNATURE" \
+    -d @"$PAYLOAD_FILE")
+fi
 
 echo -e "\nServer response:"
 echo "$RESPONSE"
