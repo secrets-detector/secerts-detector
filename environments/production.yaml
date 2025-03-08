@@ -1,0 +1,150 @@
+# Production environment configuration overrides
+
+# Set image tag for production (using specific version instead of 'latest')
+images:
+  githubApp:
+    repository: company-registry.com/secrets-detector/github-app
+    tag: v1.0.0 
+    pullPolicy: IfNotPresent
+  validationService:
+    repository: company-registry.com/secrets-detector/validation-service
+    tag: v1.0.0
+    pullPolicy: IfNotPresent
+
+# Production settings for GitHub App
+githubApp:
+  replicaCount: 3  # Higher replica count for production
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2  # Ensure at least 2 pods always available
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  service:
+    type: ClusterIP
+  livenessProbe:
+    initialDelaySeconds: 60  # Give more time on startup in production
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 4
+  readinessProbe:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  config:
+    logLevel: warn  # Minimal logging in production
+    testMode: false
+    fullFileAnalysis: false
+  githubSecret:
+    existingSecret: "prod-github-app-credentials"  # Use externally managed secrets
+  topologySpreadConstraints:
+    enabled: true
+    maxSkew: 1
+    topologyKey: "topology.kubernetes.io/zone"
+  nodeSelector:
+    tier: application
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: kubernetes.io/role
+            operator: In
+            values:
+            - worker
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+            - key: app.kubernetes.io/component
+              operator: In
+              values:
+              - github-app
+          topologyKey: "kubernetes.io/hostname"
+
+# Production settings for Validation Service
+validationService:
+  replicaCount: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 2
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 1Gi
+  config:
+    ginMode: release
+  topologySpreadConstraints:
+    enabled: true
+    maxSkew: 1
+    topologyKey: "topology.kubernetes.io/zone"
+  nodeSelector:
+    tier: application
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+        - matchExpressions:
+          - key: kubernetes.io/role
+            operator: In
+            values:
+            - worker
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchExpressions:
+            - key: app.kubernetes.io/component
+              operator: In
+              values:
+              - validation-service
+          topologyKey: "kubernetes.io/hostname"
+
+# Use production managed database (AWS Aurora)
+database:
+  host: "prod-aurora-postgres.us-west-2.rds.amazonaws.com"
+  port: 5432
+  name: "secretsdb"
+  credentialsSecret: "prod-rds-credentials"  # Managed by external secret system
+
+# Ingress for production environment
+ingress:
+  enabled: true
+  className: "alb"  # Use AWS ALB for production
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-west-2:123456789012:certificate/abcdef-1234-5678-abcd-111222333444"
+    alb.ingress.kubernetes.io/ssl-policy: "ELBSecurityPolicy-TLS-1-2-2017-01"
+    alb.ingress.kubernetes.io/wafv2-acl-arn: "arn:aws:wafv2:us-west-2:123456789012:regional/webacl/secrets-detector-waf/abcdef-1234"
+    external-dns.alpha.kubernetes.io/hostname: secrets.company.com
+  hosts:
+    - host: secrets.company.com
+      paths:
+        - path: /webhook
+          pathType: Prefix

@@ -1,0 +1,76 @@
+# Test environment configuration overrides
+
+# Set image tag for testing
+images:
+  githubApp:
+    tag: test
+    pullPolicy: IfNotPresent
+  validationService:
+    tag: test
+    pullPolicy: IfNotPresent
+
+# Testing settings for GitHub App
+githubApp:
+  replicaCount: 2  # More than one replica for basic HA testing
+  autoscaling:
+    enabled: true  # Test autoscaling functionality
+    minReplicas: 2
+    maxReplicas: 4
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  config:
+    logLevel: info
+    testMode: true  # Keep test mode enabled for simulated testing
+    fullFileAnalysis: true
+  resources:
+    limits:
+      cpu: 800m
+      memory: 768Mi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+
+# Testing settings for Validation Service
+validationService:
+  replicaCount: 2
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 4
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  config:
+    ginMode: release  # Use release mode as in production
+  resources:
+    limits:
+      cpu: 800m
+      memory: 768Mi
+    requests:
+      cpu: 200m
+      memory: 256Mi
+
+# Use test database
+database:
+  host: "test-postgres.company-internal.com"  # Test specific database server
+  port: 5432
+  name: "test-secretsdb"
+  credentialsSecret: "test-db-credentials"  # Use k8s secret for credentials
+
+# Ingress for test environment
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: "letsencrypt-staging"  # Use staging issuer
+  hosts:
+    - host: secrets-detector.test.company.com
+      paths:
+        - path: /webhook
+          pathType: Prefix
+  tls:
+    - secretName: secrets-detector-test-tls
+      hosts:
+        - secrets-detector.test.company.com

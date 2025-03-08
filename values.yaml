@@ -1,0 +1,153 @@
+# Default values for secrets-detector
+
+# Common settings
+nameOverride: ""
+fullnameOverride: ""
+
+# Service account settings
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Container image settings
+images:
+  githubApp:
+    repository: secrets-detector/github-app
+    tag: latest
+    pullPolicy: IfNotPresent
+  validationService:
+    repository: secrets-detector/validation-service
+    tag: latest
+    pullPolicy: IfNotPresent
+
+# GitHub App settings
+githubApp:
+  replicaCount: 1
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 80
+    targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8080
+  livenessProbe:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+    successThreshold: 1
+  readinessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+    successThreshold: 1
+  startupProbe:
+    enabled: true
+    failureThreshold: 30
+    periodSeconds: 10
+  config:
+    logLevel: debug
+    testMode: true
+    fullFileAnalysis: false
+  githubSecret:
+    # Set to true to use existing secret
+    existingSecret: ""
+    # Used only if existingSecret is not set
+    webhookSecret: "development_webhook_secret_123"
+    appID: "12345"
+    installationID: "67890"
+  topologySpreadConstraints:
+    enabled: false
+    maxSkew: 1
+    topologyKey: "topology.kubernetes.io/zone"
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Validation Service settings
+validationService:
+  replicaCount: 1
+  autoscaling:
+    enabled: false
+    minReplicas: 1
+    maxReplicas: 3
+    targetCPUUtilizationPercentage: 80
+    targetMemoryUtilizationPercentage: 80
+  podDisruptionBudget:
+    enabled: false
+    minAvailable: 1
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  service:
+    type: ClusterIP
+    port: 80
+    targetPort: 8080
+  livenessProbe:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+    successThreshold: 1
+  readinessProbe:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 6
+    successThreshold: 1
+  startupProbe:
+    enabled: true
+    failureThreshold: 30
+    periodSeconds: 10
+  config:
+    ginMode: debug
+  topologySpreadConstraints:
+    enabled: false
+    maxSkew: 1
+    topologyKey: "topology.kubernetes.io/zone"
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Database settings (external managed DB)
+database:
+  # Use a local PostgreSQL instance for development by default
+  host: "postgres-service"
+  port: 5432
+  name: "secretsdb"
+  # If using AWS Secrets Manager or similar
+  credentialsSecret: ""
+  # Only used if credentialsSecret is not set
+  username: "secretsuser"
+  password: "secretspass"
+
+# Ingress for exposing GitHub App webhook endpoint
+ingress:
+  enabled: false
+  className: "nginx"
+  annotations: {}
+  hosts:
+    - host: secrets-detector.example.local
+      paths:
+        - path: /webhook
+          pathType: Prefix
+  tls: []

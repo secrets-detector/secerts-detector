@@ -1,0 +1,458 @@
+###############################################
+# GitHub App Resources
+###############################################
+
+---
+# GitHub App Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "secrets-detector.fullname" . }}-github-app
+  labels:
+    {{- include "secrets-detector.githubAppLabels" . | nindent 4 }}
+spec:
+  {{- if not .Values.githubApp.autoscaling.enabled }}
+  replicas: {{ .Values.githubApp.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "secrets-detector.githubAppSelectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  template:
+    metadata:
+      labels:
+        {{- include "secrets-detector.githubAppSelectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "secrets-detector.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      volumes:
+        - name: config-volume
+          configMap:
+            name: {{ include "secrets-detector.fullname" . }}-config
+        - name: keys-volume
+          emptyDir: {}
+      initContainers:
+        - name: init-keys
+          image: busybox
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+          command: ["sh", "-c", "echo '{{ "dummy-key-for-testing" }}' > /keys/github.pem && echo '{{ "dummy-key-for-testing" }}' > /keys/enterprise.pem && chmod 600 /keys/*"]
+          volumeMounts:
+            - name: keys-volume
+              mountPath: /keys
+      containers:
+        - name: github-app
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          image: "{{ .Values.images.githubApp.repository }}:{{ .Values.images.githubApp.tag }}"
+          imagePullPolicy: {{ .Values.images.githubApp.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: APP_ENV
+              value: "production"
+            - name: LOG_LEVEL
+              value: {{ .Values.githubApp.config.logLevel | quote }}
+            - name: VALIDATION_SERVICE_URL
+              value: "http://{{ include "secrets-detector.fullname" . }}-validation-service:{{ .Values.validationService.service.port }}"
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "secrets-detector.githubSecretName" . }}
+                  key: app-id
+            - name: GITHUB_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "secrets-detector.githubSecretName" . }}
+                  key: installation-id
+            - name: GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "secrets-detector.githubSecretName" . }}
+                  key: webhook-secret
+            - name: TEST_MODE
+              value: {{ .Values.githubApp.config.testMode | quote }}
+            - name: FULL_FILE_ANALYSIS
+              value: {{ .Values.githubApp.config.fullFileAnalysis | quote }}
+            - name: DB_HOST
+              value: {{ .Values.database.host | quote }}
+            - name: DB_PORT
+              value: {{ .Values.database.port | quote }}
+            - name: DB_NAME
+              value: {{ .Values.database.name | quote }}
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.database.credentialsSecret }}
+                  name: {{ .Values.database.credentialsSecret }}
+                  {{- else }}
+                  name: {{ include "secrets-detector.fullname" . }}-db
+                  {{- end }}
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.database.credentialsSecret }}
+                  name: {{ .Values.database.credentialsSecret }}
+                  {{- else }}
+                  name: {{ include "secrets-detector.fullname" . }}-db
+                  {{- end }}
+                  key: password
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/config
+              readOnly: true
+            - name: keys-volume
+              mountPath: /app/keys
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /validate
+              port: http
+            initialDelaySeconds: {{ .Values.githubApp.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.githubApp.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.githubApp.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.githubApp.livenessProbe.failureThreshold }}
+            successThreshold: {{ .Values.githubApp.livenessProbe.successThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /validate
+              port: http
+            initialDelaySeconds: {{ .Values.githubApp.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.githubApp.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.githubApp.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.githubApp.readinessProbe.failureThreshold }}
+            successThreshold: {{ .Values.githubApp.readinessProbe.successThreshold }}
+          {{- if .Values.githubApp.startupProbe.enabled }}
+          startupProbe:
+            httpGet:
+              path: /validate
+              port: http
+            failureThreshold: {{ .Values.githubApp.startupProbe.failureThreshold }}
+            periodSeconds: {{ .Values.githubApp.startupProbe.periodSeconds }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.githubApp.resources | nindent 12 }}
+      {{- with .Values.githubApp.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.githubApp.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.githubApp.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.githubApp.topologySpreadConstraints.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.githubApp.topologySpreadConstraints.maxSkew }}
+          topologyKey: {{ .Values.githubApp.topologySpreadConstraints.topologyKey }}
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "secrets-detector.githubAppSelectorLabels" . | nindent 14 }}
+      {{- end }}
+
+---
+# GitHub App Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "secrets-detector.fullname" . }}-github-app
+  labels:
+    {{- include "secrets-detector.githubAppLabels" . | nindent 4 }}
+spec:
+  type: {{ .Values.githubApp.service.type }}
+  ports:
+    - port: {{ .Values.githubApp.service.port }}
+      targetPort: {{ .Values.githubApp.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "secrets-detector.githubAppSelectorLabels" . | nindent 4 }}
+
+{{- if .Values.githubApp.autoscaling.enabled }}
+---
+# GitHub App HPA
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "secrets-detector.fullname" . }}-github-app
+  labels:
+    {{- include "secrets-detector.githubAppLabels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "secrets-detector.fullname" . }}-github-app
+  minReplicas: {{ .Values.githubApp.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.githubApp.autoscaling.maxReplicas }}
+  metrics:
+    {{- if .Values.githubApp.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.githubApp.autoscaling.targetCPUUtilizationPercentage }}
+    {{- end }}
+    {{- if .Values.githubApp.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.githubApp.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+{{- end }}
+
+{{- if .Values.githubApp.podDisruptionBudget.enabled }}
+---
+# GitHub App PDB
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "secrets-detector.fullname" . }}-github-app
+  labels:
+    {{- include "secrets-detector.githubAppLabels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.githubApp.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "secrets-detector.githubAppSelectorLabels" . | nindent 6 }}
+{{- end }}
+
+###############################################
+# Validation Service Resources
+###############################################
+
+---
+# Validation Service Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "secrets-detector.fullname" . }}-validation-service
+  labels:
+    {{- include "secrets-detector.validationServiceLabels" . | nindent 4 }}
+spec:
+  {{- if not .Values.validationService.autoscaling.enabled }}
+  replicas: {{ .Values.validationService.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "secrets-detector.validationServiceSelectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+  template:
+    metadata:
+      labels:
+        {{- include "secrets-detector.validationServiceSelectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "secrets-detector.serviceAccountName" . }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      volumes:
+        - name: config-volume
+          configMap:
+            name: {{ include "secrets-detector.fullname" . }}-config
+      containers:
+        - name: validation-service
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          image: "{{ .Values.images.validationService.repository }}:{{ .Values.images.validationService.tag }}"
+          imagePullPolicy: {{ .Values.images.validationService.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: GIN_MODE
+              value: {{ .Values.validationService.config.ginMode | quote }}
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: {{ .Values.database.host | quote }}
+            - name: DB_PORT
+              value: {{ .Values.database.port | quote }}
+            - name: DB_NAME
+              value: {{ .Values.database.name | quote }}
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.database.credentialsSecret }}
+                  name: {{ .Values.database.credentialsSecret }}
+                  {{- else }}
+                  name: {{ include "secrets-detector.fullname" . }}-db
+                  {{- end }}
+                  key: username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  {{- if .Values.database.credentialsSecret }}
+                  name: {{ .Values.database.credentialsSecret }}
+                  {{- else }}
+                  name: {{ include "secrets-detector.fullname" . }}-db
+                  {{- end }}
+                  key: password
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/config
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /validate
+              port: http
+              httpHeaders:
+                - name: Content-Type
+                  value: application/json
+            initialDelaySeconds: {{ .Values.validationService.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.validationService.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.validationService.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.validationService.livenessProbe.failureThreshold }}
+            successThreshold: {{ .Values.validationService.livenessProbe.successThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /validate
+              port: http
+              httpHeaders:
+                - name: Content-Type
+                  value: application/json
+            initialDelaySeconds: {{ .Values.validationService.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.validationService.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.validationService.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.validationService.readinessProbe.failureThreshold }}
+            successThreshold: {{ .Values.validationService.readinessProbe.successThreshold }}
+          {{- if .Values.validationService.startupProbe.enabled }}
+          startupProbe:
+            httpGet:
+              path: /validate
+              port: http
+              httpHeaders:
+                - name: Content-Type
+                  value: application/json
+            failureThreshold: {{ .Values.validationService.startupProbe.failureThreshold }}
+            periodSeconds: {{ .Values.validationService.startupProbe.periodSeconds }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.validationService.resources | nindent 12 }}
+      {{- with .Values.validationService.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.validationService.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.validationService.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.validationService.topologySpreadConstraints.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.validationService.topologySpreadConstraints.maxSkew }}
+          topologyKey: {{ .Values.validationService.topologySpreadConstraints.topologyKey }}
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "secrets-detector.validationServiceSelectorLabels" . | nindent 14 }}
+      {{- end }}
+
+---
+# Validation Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "secrets-detector.fullname" . }}-validation-service
+  labels:
+    {{- include "secrets-detector.validationServiceLabels" . | nindent 4 }}
+spec:
+  type: {{ .Values.validationService.service.type }}
+  ports:
+    - port: {{ .Values.validationService.service.port }}
+      targetPort: {{ .Values.validationService.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "secrets-detector.validationServiceSelectorLabels" . | nindent 4 }}
+
+{{- if .Values.validationService.autoscaling.enabled }}
+---
+# Validation Service HPA
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "secrets-detector.fullname" . }}-validation-service
+  labels:
+    {{- include "secrets-detector.validationServiceLabels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "secrets-detector.fullname" . }}-validation-service
+  minReplicas: {{ .Values.validationService.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.validationService.autoscaling.maxReplicas }}
+  metrics:
+    {{- if .Values.validationService.autoscaling.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.validationService.autoscaling.targetCPUUtilizationPercentage }}
+    {{- end }}
+    {{- if .Values.validationService.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.validationService.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+{{- end }}
+
+{{- if .Values.validationService.podDisruptionBudget.enabled }}
+---
+# Validation Service PDB
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "secrets-detector.fullname" . }}-validation-service
+  labels:
+    {{- include "secrets-detector.validationServiceLabels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.validationService.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "secrets-detector.validationServiceSelectorLabels" . | nindent 6 }}
+{{- end }}

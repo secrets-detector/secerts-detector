@@ -1,0 +1,87 @@
+# Staging environment configuration overrides
+
+# Set image tag for staging
+images:
+  githubApp:
+    tag: staging
+    pullPolicy: IfNotPresent
+  validationService:
+    tag: staging
+    pullPolicy: IfNotPresent
+
+# Staging settings for GitHub App
+githubApp:
+  replicaCount: 2
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  config:
+    logLevel: info
+    testMode: false  # Disable test mode for realistic behavior
+    fullFileAnalysis: false  # Use regular mode for better performance
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 300m
+      memory: 512Mi
+  topologySpreadConstraints:
+    enabled: true  # Enable zone distribution for HA
+    maxSkew: 1
+    topologyKey: "topology.kubernetes.io/zone"
+
+# Staging settings for Validation Service
+validationService:
+  replicaCount: 2
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  config:
+    ginMode: release
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 300m
+      memory: 512Mi
+  topologySpreadConstraints:
+    enabled: true
+    maxSkew: 1
+    topologyKey: "topology.kubernetes.io/zone"
+
+# Use staging managed database
+database:
+  host: "staging-postgres.company-internal.com"
+  port: 5432
+  name: "staging-secretsdb"
+  credentialsSecret: "staging-db-credentials"
+
+# Ingress for staging environment
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"  # Use production issuer
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  hosts:
+    - host: secrets-detector.staging.company.com
+      paths:
+        - path: /webhook
+          pathType: Prefix
+  tls:
+    - secretName: secrets-detector-staging-tls
+      hosts:
+        - secrets-detector.staging.company.com
