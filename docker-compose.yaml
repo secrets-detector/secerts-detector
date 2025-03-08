@@ -93,16 +93,20 @@ services:
       - secret-validator-network
 
   grafana:
-    image: grafana/grafana:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.grafana
     ports:
       - "3001:3000"
     environment:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin
       - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_DASHBOARDS_MIN_REFRESH_INTERVAL=5s
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
     volumes:
       - grafana_data:/var/lib/grafana
-      - ./grafana/provisioning:/etc/grafana/provisioning
     depends_on:
       - postgres
     networks:
