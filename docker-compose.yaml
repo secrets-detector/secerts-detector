@@ -37,6 +37,7 @@ services:
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-development_webhook_secret_123}
       - TEST_MODE=${TEST_MODE:-false}  # For test mode toggle
       - FULL_FILE_ANALYSIS=${FULL_FILE_ANALYSIS:-false}  # New environment variable for full file analysis
+      - MOCK_FILES_MODE=${MOCK_FILES_MODE:-false}
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_USER=secretsuser

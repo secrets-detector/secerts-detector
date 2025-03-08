@@ -165,6 +165,9 @@ OO8YFPZCZ+hQkvYPBYjOF0l2qF6KPqkzQgzxBK6xzmY1J9obtr7HwgZ0Ktbk43c8
 	app.mockFiles["config/credentials.json"] = sampleConfig
 
 	app.logger.Printf("Initialized %d mock files for testing", len(app.mockFiles))
+	for filename, content := range app.mockFiles {
+		app.logger.Printf("Mock file available: %s (length: %d)", filename, len(content))
+	}
 }
 
 // Method to add custom mock files
@@ -216,13 +219,21 @@ func (app *SecretDetectorApp) getFileContents(ctx context.Context, client *githu
 
 		var allContent strings.Builder
 
-		// Get the list of files from the commit (or use all available mock files)
-		fileList := make([]string, 0, len(app.mockFiles))
+		// Initialize mock files if needed
+		if len(app.mockFiles) == 0 {
+			app.logger.Printf("Mock files map is empty! Initializing...")
+			app.initializeMockFiles()
+		}
 
-		// In a real webhook, we'd filter by what files were actually modified in the commit
-		// But for testing, we'll use all mock files or filter by mentioned files in the commit
+		// Count available mock files
+		app.logger.Printf("Total mock files available: %d", len(app.mockFiles))
+
+		// In a real webhook, we'd filter by what files were actually modified
+		// But for testing, we'll use all mock files
+		fileList := make([]string, 0, len(app.mockFiles))
 		for filename := range app.mockFiles {
 			fileList = append(fileList, filename)
+			app.logger.Printf("Adding file to process: %s", filename)
 		}
 
 		// Process each file
@@ -233,13 +244,21 @@ func (app *SecretDetectorApp) getFileContents(ctx context.Context, client *githu
 				continue
 			}
 
-			app.logger.Printf("Adding mock file content for: %s", filename)
+			app.logger.Printf("Adding mock file content for: %s (length: %d)",
+				filename, len(content))
 			allContent.WriteString(fmt.Sprintf("--- %s ---\n", filename))
 			allContent.WriteString(content)
 			allContent.WriteString("\n\n")
 		}
 
-		return allContent.String(), nil
+		result := allContent.String()
+		if len(result) == 0 {
+			app.logger.Printf("WARNING: Generated empty mock file content!")
+		} else {
+			app.logger.Printf("Generated mock file content (length: %d)", len(result))
+		}
+
+		return result, nil
 	}
 
 	app.logger.Printf("Fetching full file contents for commit %s in %s/%s",
@@ -528,21 +547,38 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 	if app.testMode && app.mockFilesMode && app.fullFileAnalysis {
 		app.logger.Printf("Running in TEST+MOCK+FULL_FILE_ANALYSIS mode - using mock files")
 
+		// First, make sure mock files are initialized
+		if len(app.mockFiles) == 0 {
+			app.logger.Printf("Mock files not initialized, initializing now...")
+			app.initializeMockFiles()
+		}
+
+		// Log available mock files to verify they exist
+		app.logger.Printf("Available mock files: %d", len(app.mockFiles))
+		for filename := range app.mockFiles {
+			app.logger.Printf("  - %s", filename)
+		}
+
 		// Use commit messages for validation
 		for _, commit := range event.Commits {
 			contentToScan = append(contentToScan, commit.GetMessage())
 		}
 
-		// Get the mock file contents
-		fileContent, err := app.getFileContents(ctx, client, &github.Repository{
-			Owner: repo.Owner,
-			Name:  repo.Name,
-		}, head)
+		// Create a GitHub repository object for getFileContents
+		repository := &github.Repository{
+			Name:  github.String(repo.GetName()),
+			Owner: &github.User{Login: github.String(repo.GetOwner().GetName())},
+		}
 
+		// Get the mock file contents
+		fileContent, err := app.getFileContents(ctx, client, repository, head)
 		if err != nil {
 			app.logger.Printf("Warning: Error getting mock file contents: %v", err)
-		} else {
+		} else if fileContent != "" {
+			app.logger.Printf("Successfully retrieved mock file contents (length: %d)", len(fileContent))
 			contentToScan = append(contentToScan, fileContent)
+		} else {
+			app.logger.Printf("Error: Retrieved empty mock file contents")
 		}
 	} else if app.testMode {
 		// Regular test mode - skip API retrieval

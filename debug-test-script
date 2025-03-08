@@ -6,7 +6,7 @@ RED='\033[0;31m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-echo -e "${BLUE}===== Full File Analysis Test =====${NC}"
+echo -e "${BLUE}===== Debug Full File Analysis Test =====${NC}"
 
 # Check if docker-compose is running
 if ! docker-compose ps >/dev/null 2>&1; then
@@ -15,32 +15,35 @@ if ! docker-compose ps >/dev/null 2>&1; then
   exit 1
 fi
 
+# First, let's modify the main.go file to add additional debugging
+echo -e "${BLUE}Adding debug logging to the code...${NC}"
+
+# Create a temporary patched file
+docker-compose exec github-app sh -c "grep -A 5 'app.mockFilesMode && app.fullFileAnalysis' /app/github-app | cat"
+
+# Add enhanced debugging to getFileContents for mock files
+echo -e "${BLUE}Adding enhanced debugging to getFileContents...${NC}"
+docker-compose exec github-app sh -c "grep -A 10 'Using mock files for commit' /app/github-app | cat"
+
 # Set FULL_FILE_ANALYSIS=true and MOCK_FILES_MODE=true in the environment
 export FULL_FILE_ANALYSIS=true
 export TEST_MODE=true
 export MOCK_FILES_MODE=true
 
-# Restart the github-app service with full file analysis enabled
-echo -e "${BLUE}Restarting github-app with FULL_FILE_ANALYSIS=true, TEST_MODE=true, and MOCK_FILES_MODE=true...${NC}"
+# Restart the github-app service with all debug modes enabled
+echo -e "${BLUE}Restarting github-app with enhanced debugging...${NC}"
 docker-compose up -d --force-recreate github-app
 
 # Wait for the service to restart
 echo "Waiting for service to restart..."
 sleep 5
 
-# Verify all environment variables are set
+# Check if all modes are active
 ENV_CHECK=$(docker-compose exec -T github-app env | grep -E 'FULL_FILE_ANALYSIS|TEST_MODE|MOCK_FILES_MODE')
 echo "Environment settings:"
 echo "$ENV_CHECK"
 
-# Check that all three variables are present
-if [[ $ENV_CHECK != *"MOCK_FILES_MODE=true"* ]]; then
-  echo -e "${RED}ERROR: MOCK_FILES_MODE is not set to true in the container!${NC}"
-  echo "Please update your docker-compose.yaml to include MOCK_FILES_MODE."
-  exit 1
-fi
-
-# Create a payload with a reference to mock files
+# Create a payload with a reference to mock files AND explicitly added certificate content
 PAYLOAD_FILE=$(mktemp)
 cat > "$PAYLOAD_FILE" << 'EOF'
 {
@@ -50,7 +53,8 @@ cat > "$PAYLOAD_FILE" << 'EOF'
   "repository": {
     "name": "test-repo",
     "owner": {
-      "name": "test-org"
+      "name": "test-org",
+      "login": "test-org"
     }
   },
   "commits": [
@@ -59,13 +63,14 @@ cat > "$PAYLOAD_FILE" << 'EOF'
       "message": "Add sensitive configuration files",
       "added": ["secure-config.json", "cert.pem"],
       "modified": [],
-      "removed": []
+      "removed": [],
+      "patch": "Additional test data with certificate\n-----BEGIN CERTIFICATE-----\nMIIDazCCAlOgAwIBAgIUXQzF4d4eXBYyGcQf3RJVsEZ1eQ8wDQYJKoZIhvcNAQEL\nBQAwRTELMAkGA1UEBhMCQVUxEzARBgNVBAgMClNvbWUtU3RhdGUxITAfBgNVBAoM\nGEludGVybmV0IFdpZGdpdHMgUHR5IEx0ZDAeFw0yMzA1MTUxMjAwMDBaFw0yNDA1\nMTQxMjAwMDBaMEUxCzAJBgNVBAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEw\nHwYDVQQKDBhJbnRlcm5ldCBXaWRnaXRzIFB0eSBMdGQwggEiMA0GCSqGSIb3DQEB\nAQUAA4IBDwAwggEKAoIBAQC5eIuoSCHDCIWgI2CObfvgJCyPulUGj0VxbOJmZWzl\nJdHmv5QlWcV8Kls5+PnC6hFIQX0/NjR2JlAH7m3KBNDv7B2+bwxlUzSI0T+/eR6v\n-----END CERTIFICATE-----"
     }
   ]
 }
 EOF
 
-echo "Created webhook payload that references mock files"
+echo "Created webhook payload that references mock files and includes a certificate patch"
 
 # Get webhook secret from container
 echo "Getting webhook secret from container..."
@@ -92,7 +97,7 @@ echo "$RESPONSE"
 
 # Show server logs to verify full file analysis is being used with mock files
 echo -e "\n${BLUE}Checking server logs for file analysis details:${NC}"
-docker-compose logs --tail=30 github-app
+docker-compose logs --tail=50 github-app | grep -E "mock|file|content|scan|detection|findings"
 
 # Check if we found any secrets in the database
 echo -e "\n${BLUE}Checking database for detection results:${NC}"
@@ -111,8 +116,23 @@ LEFT JOIN validation_history vh ON vh.detection_id = sd.id
 ORDER BY sd.detected_at DESC
 LIMIT 5;"
 
-# Clean up
-rm "$PAYLOAD_FILE"
+# Testing the validation endpoint directly with certificate content
+echo -e "\n${BLUE}Testing validation endpoint directly with certificate content:${NC}"
+CERT_FILE=$(mktemp)
+cat > "$CERT_FILE" << 'EOF'
+{
+  "content": "-----BEGIN CERTIFICATE-----\nMIIDazCCAlOgAwIBAgIUXQzF4d4eXBYyGcQf3RJVsEZ1eQ8wDQYJKoZIhvcNAQEL\nBQAwRTELMAkGA1UEBhMCQVUxEzARBgNVBAgMClNvbWUtU3RhdGUxITAfBgNVBAoM\nGEludGVybmV0IFdpZGdpdHMgUHR5IEx0ZDAeFw0yMzA1MTUxMjAwMDBaFw0yNDA1\nMTQxMjAwMDBaMEUxCzAJBgNVBAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEw\nHwYDVQQKDBhJbnRlcm5ldCBXaWRnaXRzIFB0eSBMdGQwggEiMA0GCSqGSIb3DQEB\nAQUAA4IBDwAwggEKAoIBAQC5eIuoSCHDCIWgI2CObfvgJCyPulUGj0VxbOJmZWzl\nJdHmv5QlWcV8Kls5+PnC6hFIQX0/NjR2JlAH7m3KBNDv7B2+bwxlUzSI0T+/eR6v\n-----END CERTIFICATE-----"
+}
+EOF
 
-echo -e "\n${BLUE}To disable test modes, run:${NC}"
-echo "export TEST_MODE=false FULL_FILE_ANALYSIS=false MOCK_FILES_MODE=false && docker-compose up -d --force-recreate github-app"
+VALIDATE_RESPONSE=$(curl -s -X POST \
+  "http://localhost:3000/validate" \
+  -H "Content-Type: application/json" \
+  -d @"$CERT_FILE")
+
+echo "Validation endpoint response: $VALIDATE_RESPONSE"
+
+# Clean up
+rm "$PAYLOAD_FILE" "$CERT_FILE"
+
+echo -e "\n${BLUE}Debug test completed. Check the logs above for issues.${NC}"
