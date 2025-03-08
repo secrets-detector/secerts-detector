@@ -5,10 +5,26 @@ services:
       context: .
       dockerfile: Dockerfile.service
     ports:
-      - "8080:8080"
+      - "8443:8443" # TLS port
+      - "8080:8080" # Non-TLS port for backward compatibility in dev
+      - "8081:8081" # Dedicated health check port
+    volumes:
+      - ./config/config.json:/app/config/config.json
+      - ./certs/ca/ca.crt:/app/certs/ca.crt
+      - ./certs/validation-service/validation-service.crt:/app/certs/server.crt
+      - ./certs/validation-service/validation-service.key:/app/certs/server.key
     environment:
       - GIN_MODE=release
-      - PORT=8080
+      - PORT=8443
+      - HEALTH_PORT=8081
+      - TLS_ENABLED=true
+      - TLS_CERT_FILE=/app/certs/server.crt
+      - TLS_KEY_FILE=/app/certs/server.key
+      - MTLS_ENABLED=true
+      - CA_CERT_FILE=/app/certs/ca.crt
+      # API key for service-to-service authentication
+      - API_KEY=${VALIDATION_API_KEY:-default-development-key-do-not-use-in-production}
+      # Database connection
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_USER=secretsuser
@@ -28,16 +44,29 @@ services:
     volumes:
       - ./config/config.json:/app/config/config.json
       - ./keys:/app/keys
+      - ./certs/ca/ca.crt:/app/certs/ca.crt
+      - ./certs/github-app/github-app.crt:/app/certs/client.crt
+      - ./certs/github-app/github-app.key:/app/certs/client.key
     environment:
       - APP_ENV=development
       - LOG_LEVEL=debug
-      - VALIDATION_SERVICE_URL=http://validation-service:8080
+      # Use HTTPS for validation service
+      - VALIDATION_SERVICE_URL=validation-service:8443
+      - VALIDATION_API_KEY=${VALIDATION_API_KEY:-default-development-key-do-not-use-in-production}
+      # TLS configuration for client
+      - TLS_SKIP_VERIFY=false
+      - MTLS_ENABLED=true
+      - TLS_CLIENT_CERT_FILE=/app/certs/client.crt
+      - TLS_CLIENT_KEY_FILE=/app/certs/client.key
+      - CA_CERT_FILE=/app/certs/ca.crt
+      # GitHub app credentials
       - GITHUB_APP_ID=${GITHUB_APP_ID:-12345}
       - GITHUB_INSTALLATION_ID=${GITHUB_INSTALLATION_ID:-67890}
       - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET:-development_webhook_secret_123}
-      - TEST_MODE=${TEST_MODE:-false}  # For test mode toggle
-      - FULL_FILE_ANALYSIS=${FULL_FILE_ANALYSIS:-false}  # New environment variable for full file analysis
+      - TEST_MODE=${TEST_MODE:-false}
+      - FULL_FILE_ANALYSIS=${FULL_FILE_ANALYSIS:-false}
       - MOCK_FILES_MODE=${MOCK_FILES_MODE:-false}
+      # Database connection
       - DB_HOST=postgres
       - DB_PORT=5432
       - DB_USER=secretsuser

@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha1"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -628,8 +630,73 @@ func (app *SecretDetectorApp) AddInstance(config *GitHubConfig) error {
 }
 
 func (app *SecretDetectorApp) validateContent(ctx context.Context, content string) ([]models.SecretFinding, error) {
+	// Create a custom HTTP client with TLS configuration
+	var tlsConfig *tls.Config
+
+	// Check if TLS verification should be enabled
+	tlsVerify := true
+	if val := os.Getenv("TLS_SKIP_VERIFY"); val == "true" {
+		tlsVerify = false
+		app.logger.Warn("TLS certificate verification is disabled. This should only be used in development.")
+	}
+
+	// Check if mutual TLS is enabled
+	if os.Getenv("MTLS_ENABLED") == "true" {
+		// Load client certificate and key
+		certFile := os.Getenv("TLS_CLIENT_CERT_FILE")
+		keyFile := os.Getenv("TLS_CLIENT_KEY_FILE")
+
+		if certFile == "" || keyFile == "" {
+			return nil, fmt.Errorf("TLS_CLIENT_CERT_FILE and TLS_CLIENT_KEY_FILE must be provided when mTLS is enabled")
+		}
+
+		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load client TLS certificate: %v", err)
+		}
+
+		// Create a custom CA cert pool if a CA cert is provided
+		var caCertPool *x509.CertPool
+		caCertFile := os.Getenv("CA_CERT_FILE")
+		if caCertFile != "" {
+			caCert, err := os.ReadFile(caCertFile)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read CA certificate: %v", err)
+			}
+
+			caCertPool = x509.NewCertPool()
+			if !caCertPool.AppendCertsFromPEM(caCert) {
+				return nil, fmt.Errorf("failed to parse CA certificate")
+			}
+		}
+
+		tlsConfig = &tls.Config{
+			Certificates:       []tls.Certificate{cert},
+			RootCAs:            caCertPool,
+			InsecureSkipVerify: !tlsVerify,
+			MinVersion:         tls.VersionTLS12,
+		}
+	} else if !tlsVerify {
+		// If only disabling TLS verification
+		tlsConfig = &tls.Config{
+			InsecureSkipVerify: true,
+			MinVersion:         tls.VersionTLS12,
+		}
+	}
+
+	transport := &http.Transport{
+		TLSClientConfig: tlsConfig,
+		// Add modern security defaults
+		ForceAttemptHTTP2:     true,
+		MaxIdleConnsPerHost:   10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+
 	client := &http.Client{
-		Timeout: app.valService.Timeout,
+		Transport: transport,
+		Timeout:   app.valService.Timeout,
 	}
 
 	reqBody := struct {
@@ -643,11 +710,38 @@ func (app *SecretDetectorApp) validateContent(ctx context.Context, content strin
 		return nil, fmt.Errorf("failed to marshal request: %v", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", app.valService.Endpoint+"/validate", bytes.NewBuffer(jsonBody))
+	// Determine the protocol based on TLS configuration
+	protocol := "http"
+	if tlsConfig != nil || strings.HasPrefix(app.valService.Endpoint, "https://") {
+		protocol = "https"
+	}
+
+	// Ensure endpoint doesn't already have a protocol
+	endpoint := app.valService.Endpoint
+	if strings.HasPrefix(endpoint, "http://") {
+		endpoint = strings.TrimPrefix(endpoint, "http://")
+	} else if strings.HasPrefix(endpoint, "https://") {
+		endpoint = strings.TrimPrefix(endpoint, "https://")
+	}
+
+	url := fmt.Sprintf("%s://%s/validate", protocol, endpoint)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
 	}
+
 	req.Header.Set("Content-Type", "application/json")
+
+	// Add API key authentication
+	apiKey := os.Getenv("VALIDATION_API_KEY")
+	if apiKey == "" {
+		// Default key for development only
+		apiKey = "default-development-key-do-not-use-in-production"
+		app.logger.Warn("Using default API key for validation service. This is not secure for production.")
+	}
+
+	req.Header.Set("X-API-Key", apiKey)
 
 	resp, err := client.Do(req)
 	if err != nil {

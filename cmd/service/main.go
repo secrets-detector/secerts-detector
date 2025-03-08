@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/subtle"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
@@ -9,11 +11,161 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"secrets-detector/pkg/models"
 )
+
+// APIKeyAuth middleware enforces API key authentication
+func APIKeyAuth() gin.HandlerFunc {
+	apiKey := os.Getenv("API_KEY")
+	if apiKey == "" {
+		// Default key for development - in production, this should always be overridden
+		apiKey = "default-development-key-do-not-use-in-production"
+	}
+
+	return func(c *gin.Context) {
+		clientKey := c.GetHeader("X-API-Key")
+
+		// Constant time comparison to prevent timing attacks
+		if subtle.ConstantTimeCompare([]byte(clientKey), []byte(apiKey)) != 1 {
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error": "Invalid API key",
+			})
+			c.Abort()
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// CORSMiddleware handles Cross-Origin Resource Sharing
+func CORSMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-API-Key, Authorization")
+
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(http.StatusNoContent)
+			return
+		}
+
+		c.Next()
+	}
+}
+
+// RequestLogger logs requests with sensitive data redacted
+func RequestLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Start timer
+		start := time.Now()
+		path := c.Request.URL.Path
+
+		// Process request
+		c.Next()
+
+		// Execution time
+		latency := time.Since(start)
+
+		// Log only non-sensitive paths and information
+		if !strings.Contains(path, "/validate") {
+			log.Printf("[INFO] %s %s - %d (%s)", c.Request.Method, path, c.Writer.Status(), latency)
+		} else {
+			// For sensitive paths, log minimal information
+			log.Printf("[INFO] %s %s - %d (%s)", c.Request.Method, path, c.Writer.Status(), latency)
+		}
+	}
+}
+
+// TLS configuration
+func configureTLS() (*tls.Config, error) {
+	// Check if TLS is enabled
+	tlsEnabled := os.Getenv("TLS_ENABLED")
+	if strings.ToLower(tlsEnabled) != "true" {
+		log.Println("[WARN] TLS is disabled. This should only be used in development.")
+		return nil, nil
+	}
+
+	// Load TLS certificate and key
+	certFile := os.Getenv("TLS_CERT_FILE")
+	keyFile := os.Getenv("TLS_KEY_FILE")
+	if certFile == "" || keyFile == "" {
+		return nil, fmt.Errorf("TLS_CERT_FILE and TLS_KEY_FILE must be provided when TLS is enabled")
+	}
+
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load TLS certificate: %v", err)
+	}
+
+	// Configure TLS with modern cipher suites and TLS 1.2+
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+		},
+	}
+
+	// Optionally configure mutual TLS (client certificate validation)
+	if strings.ToLower(os.Getenv("MTLS_ENABLED")) == "true" {
+		caCertFile := os.Getenv("CA_CERT_FILE")
+		if caCertFile == "" {
+			return nil, fmt.Errorf("CA_CERT_FILE must be provided when mTLS is enabled")
+		}
+
+		caCert, err := os.ReadFile(caCertFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read CA certificate: %v", err)
+		}
+
+		caCertPool := x509.NewCertPool()
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("failed to parse CA certificate")
+		}
+
+		tlsConfig.ClientCAs = caCertPool
+		tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+
+	return tlsConfig, nil
+}
+
+// Function to set up a health endpoint server
+func startHealthServer(port string) {
+	// Create a separate router for health checks
+	healthRouter := gin.New()
+	healthRouter.Use(gin.Recovery())
+
+	// Health check endpoint on separate port without mTLS
+	healthRouter.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status": "ok",
+		})
+	})
+
+	// Start health server on its own port
+	healthPort := port
+	if healthPort == "" {
+		healthPort = "8081" // Default health port if not specified
+	}
+
+	go func() {
+		log.Printf("Starting health check server on port %s", healthPort)
+		if err := http.ListenAndServe(":"+healthPort, healthRouter); err != nil {
+			log.Printf("Health server failed: %v", err)
+		}
+	}()
+}
 
 // Simplified certificate validation - focus on structure not content
 func validateCertificate(cert string) (bool, string) {
@@ -124,9 +276,31 @@ func truncateCert(cert string) string {
 }
 
 func setupRouter() *gin.Engine {
-	r := gin.Default()
+	// Set Gin mode from environment
+	ginMode := os.Getenv("GIN_MODE")
+	if ginMode != "" {
+		gin.SetMode(ginMode)
+	}
 
-	r.POST("/validate", func(c *gin.Context) {
+	r := gin.New() // Use New() instead of Default() for more control
+
+	// Apply middleware
+	r.Use(CORSMiddleware())
+	r.Use(RequestLogger())
+
+	// Add health check to main router too (but it will require mTLS when enabled)
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status": "ok",
+		})
+	})
+
+	// Create an authenticated group for sensitive endpoints
+	authGroup := r.Group("/")
+	authGroup.Use(APIKeyAuth())
+
+	// Authenticated validate endpoint
+	authGroup.POST("/validate", func(c *gin.Context) {
 		var req struct {
 			Content string `json:"content"`
 		}
@@ -154,7 +328,7 @@ func setupRouter() *gin.Engine {
 			cert = strings.ReplaceAll(cert, "\\n", "\n")
 			cert = strings.TrimSpace(cert)
 
-			// Log for debugging
+			// Log for debugging - redact sensitive data
 			log.Printf("Found certificate: %s", truncateCert(cert))
 
 			isValid, message := validateCertificate(cert)
@@ -180,7 +354,7 @@ func setupRouter() *gin.Engine {
 			key = strings.ReplaceAll(key, "\\n", "\n")
 			key = strings.TrimSpace(key)
 
-			// Log for debugging
+			// Log for debugging - redact sensitive data
 			log.Printf("Found private key: %s", truncateCert(key))
 
 			isValid, message := validatePrivateKey(key)
@@ -226,7 +400,7 @@ func setupRouter() *gin.Engine {
 	})
 
 	// Endpoint for validating individual secrets
-	r.POST("/validate/secret", func(c *gin.Context) {
+	authGroup.POST("/validate/secret", func(c *gin.Context) {
 		var req models.ValidationRequest
 		if err := c.BindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, models.ValidationResponse{
@@ -259,15 +433,45 @@ func setupRouter() *gin.Engine {
 }
 
 func main() {
+	// Main server port
 	port := os.Getenv("PORT")
 	if port == "" {
-		port = "8080"
+		port = "8443" // Default to secure port
+	}
+
+	// Health server port
+	healthPort := os.Getenv("HEALTH_PORT")
+	if healthPort == "" {
+		healthPort = "8081" // Default health port
 	}
 
 	// Add standard library logging
 	logger := log.New(os.Stdout, "[ValidationService] ", log.LstdFlags)
 	logger.Printf("Starting validation service on port %s", port)
 
+	// Start the health endpoint on a separate port
+	startHealthServer(healthPort)
+
 	r := setupRouter()
-	r.Run(":" + port)
+
+	// Check if TLS is enabled
+	tlsConfig, err := configureTLS()
+	if err != nil {
+		logger.Fatalf("Failed to configure TLS: %v", err)
+	}
+
+	server := &http.Server{
+		Addr:    ":" + port,
+		Handler: r,
+	}
+
+	// Start the server with or without TLS
+	if tlsConfig != nil {
+		server.TLSConfig = tlsConfig
+		logger.Printf("Starting server with TLS on port %s", port)
+		logger.Fatal(server.ListenAndServeTLS("", ""))
+	} else {
+		logger.Printf("Starting server without TLS on port %s (NOT RECOMMENDED FOR PRODUCTION)", port)
+		logger.Fatal(server.ListenAndServe())
+	}
 }

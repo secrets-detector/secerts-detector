@@ -40,17 +40,18 @@ spec:
           configMap:
             name: {{ include "secrets-detector.fullname" . }}-config
         - name: keys-volume
-          emptyDir: {}
-      initContainers:
-        - name: init-keys
-          image: busybox
-          securityContext:
-            runAsNonRoot: true
-            runAsUser: 10001
-          command: ["sh", "-c", "echo '{{ "dummy-key-for-testing" }}' > /keys/github.pem && echo '{{ "dummy-key-for-testing" }}' > /keys/enterprise.pem && chmod 600 /keys/*"]
-          volumeMounts:
-            - name: keys-volume
-              mountPath: /keys
+          secret:
+            secretName: {{ include "secrets-detector.githubSecretName" . }}
+            defaultMode: 0400
+            items:
+              - key: github-pem
+                path: github.pem
+              - key: enterprise-pem
+                path: enterprise.pem
+        - name: client-certs-volume
+          secret:
+            secretName: {{ include "secrets-detector.fullname" . }}-client-tls
+            defaultMode: 0400
       containers:
         - name: github-app
           securityContext:
@@ -67,11 +68,29 @@ spec:
               protocol: TCP
           env:
             - name: APP_ENV
-              value: "production"
+              value: {{ .Values.environment | default "production" | quote }}
             - name: LOG_LEVEL
               value: {{ .Values.githubApp.config.logLevel | quote }}
+            # Validation service configuration with TLS
             - name: VALIDATION_SERVICE_URL
-              value: "http://{{ include "secrets-detector.fullname" . }}-validation-service:{{ .Values.validationService.service.port }}"
+              value: "{{ include "secrets-detector.fullname" . }}-validation-service:{{ .Values.validationService.service.port }}"
+            - name: VALIDATION_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "secrets-detector.fullname" . }}-api-key
+                  key: api-key
+            # TLS configuration for client
+            - name: TLS_SKIP_VERIFY
+              value: {{ .Values.tls.skipVerify | default "false" | quote }}
+            - name: MTLS_ENABLED
+              value: {{ .Values.tls.mtls.enabled | quote }}
+            - name: TLS_CLIENT_CERT_FILE
+              value: "/client-certs/client.crt"
+            - name: TLS_CLIENT_KEY_FILE
+              value: "/client-certs/client.key"
+            - name: CA_CERT_FILE
+              value: "/client-certs/ca.crt"
+            # GitHub app credentials
             - name: GITHUB_APP_ID
               valueFrom:
                 secretKeyRef:
@@ -91,6 +110,9 @@ spec:
               value: {{ .Values.githubApp.config.testMode | quote }}
             - name: FULL_FILE_ANALYSIS
               value: {{ .Values.githubApp.config.fullFileAnalysis | quote }}
+            - name: MOCK_FILES_MODE
+              value: {{ .Values.githubApp.config.mockFilesMode | default "false" | quote }}
+            # Database connection
             - name: DB_HOST
               value: {{ .Values.database.host | quote }}
             - name: DB_PORT
@@ -105,7 +127,7 @@ spec:
                   {{- else }}
                   name: {{ include "secrets-detector.fullname" . }}-db
                   {{- end }}
-                  key: username
+                  key: DB_USER
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -114,13 +136,16 @@ spec:
                   {{- else }}
                   name: {{ include "secrets-detector.fullname" . }}-db
                   {{- end }}
-                  key: password
+                  key: DB_PASSWORD
           volumeMounts:
             - name: config-volume
               mountPath: /app/config
               readOnly: true
             - name: keys-volume
               mountPath: /app/keys
+              readOnly: true
+            - name: client-certs-volume
+              mountPath: /client-certs
               readOnly: true
           livenessProbe:
             httpGet:
@@ -282,6 +307,10 @@ spec:
         - name: config-volume
           configMap:
             name: {{ include "secrets-detector.fullname" . }}-config
+        - name: certs-volume
+          secret:
+            secretName: {{ include "secrets-detector.fullname" . }}-tls
+            defaultMode: 0400
       containers:
         - name: validation-service
           securityContext:
@@ -293,14 +322,40 @@ spec:
           image: "{{ .Values.images.validationService.repository }}:{{ .Values.images.validationService.tag }}"
           imagePullPolicy: {{ .Values.images.validationService.pullPolicy }}
           ports:
+            - name: https
+              containerPort: 8443
+              protocol: TCP
             - name: http
               containerPort: 8080
+              protocol: TCP
+            - name: health
+              containerPort: 8081
               protocol: TCP
           env:
             - name: GIN_MODE
               value: {{ .Values.validationService.config.ginMode | quote }}
             - name: PORT
-              value: "8080"
+              value: "8443"
+            - name: HEALTH_PORT
+              value: "8081"
+            # TLS Configuration
+            - name: TLS_ENABLED
+              value: {{ .Values.tls.enabled | quote }}
+            - name: TLS_CERT_FILE
+              value: "/certs/tls.crt"
+            - name: TLS_KEY_FILE
+              value: "/certs/tls.key"
+            - name: MTLS_ENABLED
+              value: {{ .Values.tls.mtls.enabled | quote }}
+            - name: CA_CERT_FILE
+              value: "/certs/ca.crt"
+            # API Key for service authentication
+            - name: API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "secrets-detector.fullname" . }}-api-key
+                  key: api-key
+            # Database connection
             - name: DB_HOST
               value: {{ .Values.database.host | quote }}
             - name: DB_PORT
@@ -315,7 +370,7 @@ spec:
                   {{- else }}
                   name: {{ include "secrets-detector.fullname" . }}-db
                   {{- end }}
-                  key: username
+                  key: DB_USER
             - name: DB_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -324,18 +379,20 @@ spec:
                   {{- else }}
                   name: {{ include "secrets-detector.fullname" . }}-db
                   {{- end }}
-                  key: password
+                  key: DB_PASSWORD
           volumeMounts:
             - name: config-volume
               mountPath: /app/config
               readOnly: true
+            - name: certs-volume
+              mountPath: /certs
+              readOnly: true
+          # Update liveness and readiness probes to use health endpoint
           livenessProbe:
             httpGet:
-              path: /validate
-              port: http
-              httpHeaders:
-                - name: Content-Type
-                  value: application/json
+              path: /health
+              port: health
+              scheme: HTTP
             initialDelaySeconds: {{ .Values.validationService.livenessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.validationService.livenessProbe.periodSeconds }}
             timeoutSeconds: {{ .Values.validationService.livenessProbe.timeoutSeconds }}
@@ -343,11 +400,9 @@ spec:
             successThreshold: {{ .Values.validationService.livenessProbe.successThreshold }}
           readinessProbe:
             httpGet:
-              path: /validate
-              port: http
-              httpHeaders:
-                - name: Content-Type
-                  value: application/json
+              path: /health
+              port: health
+              scheme: HTTP
             initialDelaySeconds: {{ .Values.validationService.readinessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.validationService.readinessProbe.periodSeconds }}
             timeoutSeconds: {{ .Values.validationService.readinessProbe.timeoutSeconds }}
@@ -356,11 +411,9 @@ spec:
           {{- if .Values.validationService.startupProbe.enabled }}
           startupProbe:
             httpGet:
-              path: /validate
-              port: http
-              httpHeaders:
-                - name: Content-Type
-                  value: application/json
+              path: /health
+              port: health
+              scheme: HTTP
             failureThreshold: {{ .Values.validationService.startupProbe.failureThreshold }}
             periodSeconds: {{ .Values.validationService.startupProbe.periodSeconds }}
           {{- end }}
@@ -389,7 +442,7 @@ spec:
       {{- end }}
 
 ---
-# Validation Service
+# Main Validation Service (TLS/mTLS secured)
 apiVersion: v1
 kind: Service
 metadata:
@@ -400,9 +453,28 @@ spec:
   type: {{ .Values.validationService.service.type }}
   ports:
     - port: {{ .Values.validationService.service.port }}
-      targetPort: {{ .Values.validationService.service.targetPort }}
+      targetPort: {{ if .Values.tls.enabled }}https{{ else }}http{{ end }}
       protocol: TCP
-      name: http
+      name: {{ if .Values.tls.enabled }}https{{ else }}http{{ end }}
+  selector:
+    {{- include "secrets-detector.validationServiceSelectorLabels" . | nindent 4 }}
+
+---
+# Health Check Service (non-TLS)
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "secrets-detector.fullname" . }}-validation-service-health
+  labels:
+    {{- include "secrets-detector.validationServiceLabels" . | nindent 4 }}
+    app.kubernetes.io/component: health-check
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8081
+      targetPort: health
+      protocol: TCP
+      name: health
   selector:
     {{- include "secrets-detector.validationServiceSelectorLabels" . | nindent 4 }}
 
