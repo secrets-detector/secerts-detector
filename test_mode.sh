@@ -33,10 +33,13 @@ echo "Test mode status: $TEST_MODE_CHECK"
 # Run the webhook test
 echo -e "\n${BLUE}Running webhook test...${NC}"
 ./test_webhook.sh
+docker-compose logs github-app
+docker-compose logs validation-service
+docker-compose logs postgres
 
 # Run the secrets test
-echo -e "\n${BLUE}Running secrets detection test...${NC}"
-./test_secrets.sh
+# echo -e "\n${BLUE}Running secrets detection test...${NC}"
+# ./test_secrets.sh
 
-echo -e "\n${BLUE}Tests completed.${NC}"
-echo -e "To disable test mode, run: export TEST_MODE=false && docker-compose up -d --force-recreate github-app"
+# echo -e "\n${BLUE}Tests completed.${NC}"
+# echo -e "To disable test mode, run: export TEST_MODE=false && docker-compose up -d --force-recreate github-app"

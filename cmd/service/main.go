@@ -22,6 +22,12 @@ func validateCertificate(cert string) (bool, string) {
 		return false, "Not a certificate"
 	}
 
+	// Clean the certificate string - normalize line endings and spaces
+	cert = strings.ReplaceAll(cert, "\\n", "\n")
+	cert = strings.ReplaceAll(cert, "\r\n", "\n")
+	cert = strings.ReplaceAll(cert, "\r", "\n")
+	cert = strings.TrimSpace(cert)
+
 	// Check for test/dummy certificates by exact string match
 	if strings.Contains(strings.ToLower(cert), "test") ||
 		strings.Contains(strings.ToLower(cert), "dummy") ||
@@ -53,17 +59,18 @@ func validatePrivateKey(key string) (bool, string) {
 		return false, "Not a private key"
 	}
 
+	// Clean the key string - normalize line endings
+	key = strings.ReplaceAll(key, "\\n", "\n")
+	key = strings.ReplaceAll(key, "\r\n", "\n")
+	key = strings.ReplaceAll(key, "\r", "\n")
+	key = strings.TrimSpace(key)
+
 	// Check for test/dummy keys
 	if strings.Contains(strings.ToLower(key), "test") ||
 		strings.Contains(strings.ToLower(key), "dummy") ||
 		strings.Contains(strings.ToLower(key), "example") {
 		return false, "Test private key"
 	}
-
-	// Normalize whitespace and line endings
-	key = strings.ReplaceAll(key, "\r\n", "\n")
-	key = strings.ReplaceAll(key, "\r", "\n")
-	key = strings.TrimSpace(key)
 
 	// Try to decode the PEM block
 	block, _ := pem.Decode([]byte(key))
@@ -94,9 +101,12 @@ func validatePrivateKey(key string) (bool, string) {
 
 // Helper function to clean up PEM content
 func cleanPEM(content string) string {
-	// Replace all line endings with \n
+	// Handle various line ending formats
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	content = strings.ReplaceAll(content, "\r", "\n")
+
+	// Handle escaped newlines (which might be in JSON)
+	content = strings.ReplaceAll(content, "\\n", "\n")
 
 	// Replace multiple newlines with a single newline
 	multipleNewlines := regexp.MustCompile(`\n+`)
@@ -105,16 +115,16 @@ func cleanPEM(content string) string {
 	return content
 }
 
+// Helper function to truncate cert/key for logging
+func truncateCert(cert string) string {
+	if len(cert) > 100 {
+		return cert[:50] + "..." + cert[len(cert)-50:]
+	}
+	return cert
+}
+
 func setupRouter() *gin.Engine {
 	r := gin.Default()
-
-	// Add this health check endpoint
-	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":  "healthy",
-			"service": "validation-service",
-		})
-	})
 
 	r.POST("/validate", func(c *gin.Context) {
 		var req struct {
@@ -127,19 +137,26 @@ func setupRouter() *gin.Engine {
 			return
 		}
 
-		// Clean the content
+		// Clean the content and normalize line endings
 		content := cleanPEM(req.Content)
 
 		// Look for patterns in the content
 		findings := []models.SecretFinding{}
 
-		// Check for certificates
+		// Check for certificates - more flexible pattern that handles newlines and escaped newlines
 		certPattern := "-----BEGIN CERTIFICATE-----[\\s\\S]*?-----END CERTIFICATE-----"
 		certRegex := regexp.MustCompile(certPattern)
 		certMatches := certRegex.FindAllStringIndex(content, -1)
 
 		for _, match := range certMatches {
 			cert := content[match[0]:match[1]]
+			// Normalize the certificate by replacing escaped newlines with actual newlines
+			cert = strings.ReplaceAll(cert, "\\n", "\n")
+			cert = strings.TrimSpace(cert)
+
+			// Log for debugging
+			log.Printf("Found certificate: %s", truncateCert(cert))
+
 			isValid, message := validateCertificate(cert)
 			finding := models.SecretFinding{
 				Type:     "certificate",
@@ -159,6 +176,13 @@ func setupRouter() *gin.Engine {
 
 		for _, match := range keyMatches {
 			key := content[match[0]:match[1]]
+			// Normalize the key by replacing escaped newlines with actual newlines
+			key = strings.ReplaceAll(key, "\\n", "\n")
+			key = strings.TrimSpace(key)
+
+			// Log for debugging
+			log.Printf("Found private key: %s", truncateCert(key))
+
 			isValid, message := validatePrivateKey(key)
 			finding := models.SecretFinding{
 				Type:     "private_key",
