@@ -251,9 +251,10 @@ type SecretDetectorApp struct {
 	testPatches      []string          // Field to store extracted patches for test mode
 	mockFilesMode    bool              // New field to indicate mock files mode
 	mockFiles        map[string]string // Map to store mock file contents by filename
+	blockCommits     bool              // Field to indicate if commits should be blocked
 }
 
-func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger, testMode bool, fullFileAnalysis bool) *SecretDetectorApp {
+func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger, testMode bool, fullFileAnalysis bool, blockCommits bool) *SecretDetectorApp {
 	defaultLogger := log.New(os.Stdout, "[SecretDetector] ", log.LstdFlags|log.Lshortfile)
 	if logger == nil {
 		logger = defaultLogger
@@ -325,6 +326,7 @@ func NewSecretDetectorApp(validationEndpoint string, logger *log.Logger, testMod
 		testPatches:      make([]string, 0),
 		mockFilesMode:    mockFilesMode,
 		mockFiles:        make(map[string]string),
+		blockCommits:     blockCommits,
 	}
 
 	// If in mock files mode, initialize with some test files
@@ -386,7 +388,7 @@ func (app *SecretDetectorApp) AddMockFile(filename, content string) {
 }
 
 func loadPatterns(configPath string) (map[string]*regexp.Regexp, error) {
-	defaultLogger := log.New(log.Writer(), "[LoadPatterns] ", log.LstdFlags)
+	defaultLogger := log.New(os.Stdout, "[LoadPatterns] ", log.LstdFlags)
 	safeLogger := NewSafeLogger(defaultLogger, "info")
 
 	safeLogger.Info("Attempting to load patterns from: %s", configPath)
@@ -808,9 +810,12 @@ func (app *SecretDetectorApp) createStatus(ctx context.Context, client *github.C
 		}
 	}
 
-	if validSecrets {
+	if validSecrets && app.blockCommits {
 		state = "failure"
 		description = fmt.Sprintf("Blocked: Found %d valid secrets (certificate/key)", secretCount)
+	} else if validSecrets && !app.blockCommits {
+		// Still success state, but warning message
+		description = fmt.Sprintf("Warning: Found %d valid secrets, but not blocking due to configuration", secretCount)
 	} else if len(findings) > 0 {
 		// Findings exist but none are valid (test data, etc.)
 		description = fmt.Sprintf("No valid secrets detected (%d invalid/test secrets found)", len(findings))
@@ -961,7 +966,12 @@ func (app *SecretDetectorApp) handlePushEvent(ctx context.Context, client *githu
 
 			// Only block if the secret is valid
 			if finding.IsValid {
-				app.logger.Warn("BLOCKING: Found valid %s in commit", finding.Type)
+				if app.blockCommits {
+					app.logger.Warn("BLOCKING: Found valid %s in commit", finding.Type)
+				} else {
+					app.logger.Warn("DETECTED: Found valid %s in commit (not blocking due to configuration)", finding.Type)
+					finding.Message += " (Commit allowed - blocking disabled by configuration)"
+				}
 
 				// Log to database
 				repoModel := &models.Repository{
@@ -1273,7 +1283,15 @@ func main() {
 		logger.Info("Starting with MOCK FILES MODE enabled - will use local mock files instead of GitHub API")
 	}
 
-	app := NewSecretDetectorApp(validationServiceURL, stdLogger, testMode, fullFileAnalysis)
+	// Check if we should block commits
+	blockCommits := os.Getenv("BLOCK_COMMITS") != "false"
+	if !blockCommits {
+		logger.Info("Starting with COMMIT BLOCKING DISABLED - valid secrets will be detected but not blocked")
+	} else {
+		logger.Info("Starting with commit blocking enabled - valid secrets will block commits")
+	}
+
+	app := NewSecretDetectorApp(validationServiceURL, stdLogger, testMode, fullFileAnalysis, blockCommits)
 
 	// Load GitHub.com private key
 	privateKey, err := os.ReadFile("/app/keys/github.pem")

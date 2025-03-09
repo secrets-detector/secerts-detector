@@ -64,6 +64,7 @@ githubApp:
     logLevel: debug
     testMode: true
     fullFileAnalysis: false
+    blockCommits: false
   githubSecret:
     # Set to true to use existing secret
     existingSecret: ""
