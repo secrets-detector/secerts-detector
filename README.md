@@ -1,33 +1,243 @@
-# Secrets Detector Helm Chart
+# Secrets Detector
 
-This Helm chart deploys the Secrets Detector application, which scans GitHub repositories for secrets, certificates, and sensitive tokens in committed code.
+A security scanning application that detects and validates sensitive information in GitHub repositories. It identifies secrets, certificates, and API tokens committed to code repositories, helping protect your organization from credential leaks and security breaches.
 
-## Architecture
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-The application consists of two main components:
+## 📋 Table of Contents
 
-1. **GitHub App** - Receives webhooks from GitHub and processes repository events
-2. **Validation Service** - Validates detected secrets to determine if they are legitimate issues
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Prerequisites](#prerequisites)
+- [Installation](#installation)
+  - [Kubernetes Deployment with Helm](#kubernetes-deployment-with-helm)
+  - [Docker Compose Deployment](#docker-compose-deployment)
+- [Configuration](#configuration)
+  - [GitHub App Setup](#github-app-setup)
+  - [Environment Variables](#environment-variables)
+  - [Secrets Management](#secrets-management)
+- [Local Development](#local-development)
+  - [Development Environment Setup](#development-environment-setup)
+  - [Running the Services Locally](#running-the-services-locally)
+  - [Debug and Testing Tools](#debug-and-testing-tools)
+- [Testing](#testing)
+  - [Running Tests](#running-tests)
+  - [Test Coverage](#test-coverage)
+  - [Integration Testing](#integration-testing)
+- [Security](#security)
+  - [TLS Configuration](#tls-configuration)
+  - [Secure Service Communication](#secure-service-communication)
+  - [Secrets Storage](#secrets-storage)
+- [Contributing](#contributing)
+  - [Development Workflow](#development-workflow)
+  - [Pull Request Process](#pull-request-process)
+  - [Coding Standards](#coding-standards)
+- [License](#license)
 
-This architecture uses a managed database (e.g., AWS Aurora PostgreSQL, Azure Database for PostgreSQL, Google Cloud SQL) for storing detection results.
+## 🔍 Overview
 
-## Prerequisites
+The Secrets Detector scans GitHub repositories for committed secrets, certificates, and API tokens. When detected, these items are validated to determine if they are legitimate secrets or test/dummy data. Real secrets can be blocked from being committed, protecting your organization from accidental credential leaks.
 
-- Kubernetes 1.19+
-- Helm 3.2.0+
-- A registered GitHub App with appropriate permissions
-- A managed PostgreSQL-compatible database instance
-- An Ingress controller for webhook endpoint exposure
+### Key Features
 
-## Local Development
+- **Automated Secret Detection**: Scans repository content for various types of sensitive information
+- **Validation Engine**: Distinguishes between real secrets and test/dummy data
+- **GitHub Integration**: Works as a GitHub App to process repository events
+- **Push Protection**: Can block commits containing real secrets
+- **Visualization**: Includes Grafana dashboards for monitoring and reporting
+- **GitHub Advanced Security Integration**: Compatible with GitHub's security features
+
+## 🏗️ Architecture
+
+The application consists of several key components:
+
+1. **GitHub App** - A service that receives webhook events from GitHub, processes the repository content, and detects potential secrets. Written in Go, it communicates with GitHub's API and your repositories.
+
+2. **Validation Service** - A separate service that validates detected secrets to determine if they are legitimate issues or test/dummy data. It employs various validation techniques for different types of secrets.
+
+3. **Database** - A PostgreSQL database stores detection results, repository information, and validation history.
+
+4. **Grafana Dashboard** - Visualization and monitoring of detection metrics and repository risk.
+
+The components communicate securely using mutual TLS authentication and API keys for service-to-service communication.
+
+## 📋 Prerequisites
+
+- **For Kubernetes deployment:**
+  - Kubernetes 1.19+
+  - Helm 3.2.0+
+  - A registered GitHub App with appropriate permissions
+  - A PostgreSQL-compatible database (AWS Aurora PostgreSQL, Azure Database, etc.)
+  - An Ingress controller for webhook endpoint exposure
+
+- **For local development:**
+  - Go 1.23+
+  - Docker and Docker Compose
+  - Git
+  - OpenSSL (for certificate generation)
+
+## 🚀 Installation
+
+### Kubernetes Deployment with Helm
+
+1. **Register a GitHub App** in your organization with the following permissions:
+   - Repository contents: Read
+   - Metadata: Read
+   - Pull requests: Read
+   - Subscribe to events: Push, Pull request
+
+2. **Get your GitHub App credentials**:
+   - App ID
+   - Installation ID
+   - Private key (download and save securely)
+   - Generate a webhook secret
+
+3. **Install using Helm**:
+
+```bash
+# Add the Helm repository (if applicable)
+# helm repo add secrets-detector https://your-helm-repo.example.com
+# helm repo update
+
+# Create namespace
+kubectl create namespace secrets-detector
+
+# Create a secret for GitHub App credentials
+kubectl create secret generic github-app-credentials \
+  --namespace secrets-detector \
+  --from-file=github.pem=/path/to/private-key.pem \
+  --from-literal=webhook-secret=your-webhook-secret \
+  --from-literal=app-id=your-app-id \
+  --from-literal=installation-id=your-installation-id
+
+# Create a secret for database credentials
+kubectl create secret generic db-credentials \
+  --namespace secrets-detector \
+  --from-literal=DB_USER=your-db-user \
+  --from-literal=DB_PASSWORD=your-db-password
+
+# Install the Helm chart
+helm install secrets-detector ./secrets-detector \
+  --namespace secrets-detector \
+  --set database.host=your-db-host.example.com \
+  --set database.credentialsSecret=db-credentials \
+  --set githubApp.githubSecret.existingSecret=github-app-credentials
+```
+
+4. **Configure your GitHub App webhook URL**:
+   - After deployment, get your ingress URL: `kubectl get ingress -n secrets-detector`
+   - Update your GitHub App settings with the webhook URL: `https://your-ingress-url/webhook`
+
+### Docker Compose Deployment
+
+For development or smaller deployments, you can use Docker Compose:
+
+1. **Clone the repository**:
+```bash
+git clone https://github.com/your-org/secrets-detector.git
+cd secrets-detector
+```
+
+2. **Configure environment variables**:
+```bash
+cp .env.example .env
+# Edit .env with your GitHub App credentials and other configuration
+```
+
+3. **Generate TLS certificates** (if using mTLS):
+```bash
+./test-tls-cert-creation.sh
+```
+
+4. **Start the services**:
+```bash
+docker-compose up -d
+```
+
+5. **Update your GitHub App webhook URL** to point to your Docker host: `http://your-server:3000/webhook`
+
+## ⚙️ Configuration
+
+### GitHub App Setup
+
+1. **Create a GitHub App** in your organization:
+   - Navigate to Settings → Developer settings → GitHub Apps → New GitHub App
+   - Set the name, homepage URL, and webhook URL
+   - Set permissions:
+     - Repository contents: Read
+     - Metadata: Read
+     - Pull requests: Read
+   - Subscribe to events: Push, Pull request
+   - Generate and download a private key
+
+2. **Install the app** to your organization or specific repositories
+
+### Environment Variables
+
+The application can be configured using environment variables:
+
+**GitHub App:**
+- `GITHUB_APP_ID` - The ID of your GitHub App
+- `GITHUB_INSTALLATION_ID` - The installation ID of your GitHub App
+- `GITHUB_WEBHOOK_SECRET` - Secret used to validate webhook payloads
+- `GITHUB_ENTERPRISE_HOST` - (Optional) For GitHub Enterprise deployments
+- `LOG_LEVEL` - Logging level (debug, info, warn, error)
+- `TEST_MODE` - Enable test mode (true/false)
+- `FULL_FILE_ANALYSIS` - Analyze full files rather than just diffs (true/false)
+- `BLOCK_COMMITS` - Whether to block commits containing secrets (true/false)
+
+**Validation Service:**
+- `GIN_MODE` - Gin framework mode (debug, release)
+- `TLS_ENABLED` - Enable TLS (true/false)
+- `MTLS_ENABLED` - Enable mutual TLS (true/false)
+- `TLS_CERT_FILE` - Path to TLS certificate
+- `TLS_KEY_FILE` - Path to TLS key
+- `CA_CERT_FILE` - Path to CA certificate for mTLS
+
+**Database:**
+- `DB_HOST` - Database host
+- `DB_PORT` - Database port
+- `DB_USER` - Database username
+- `DB_PASSWORD` - Database password
+- `DB_NAME` - Database name
+
+### Secrets Management
+
+For production deployments, we recommend using a secure secrets management solution:
+
+**Kubernetes Secrets with RBAC:**
+```bash
+kubectl create secret generic github-app-credentials \
+  --namespace secrets-detector \
+  --from-file=github.pem=/path/to/private-key.pem \
+  --from-literal=webhook-secret=your-webhook-secret \
+  --from-literal=app-id=your-app-id \
+  --from-literal=installation-id=your-installation-id
+```
+
+**AWS Secrets Manager:**
+```bash
+aws secretsmanager create-secret \
+  --name github-app-secrets \
+  --secret-string '{"webhook-secret":"your-webhook-secret","app-id":"your-app-id","installation-id":"your-installation-id"}'
+```
+
+**HashiCorp Vault:**
+```bash
+vault kv put secret/github-app/credentials \
+  webhook-secret="your-webhook-secret" \
+  app-id="your-app-id" \
+  installation-id="your-installation-id" \
+  private-key=@/path/to/private-key.pem
+```
+
+## 💻 Local Development
 
 ### Development Environment Setup
 
 1. **Prerequisites**:
    - Go 1.23+
    - Docker and Docker Compose
-   - kubectl
-   - A local Kubernetes cluster (minikube, kind, or Docker Desktop)
    - Git
 
 2. **Clone the repository**:
@@ -36,30 +246,25 @@ This architecture uses a managed database (e.g., AWS Aurora PostgreSQL, Azure Da
    cd secrets-detector
    ```
 
-3. **Set up local GitHub App for development**:
-   - Create a new GitHub App in your personal GitHub account
-   - Set Webhook URL to your local development environment (can use ngrok for this)
-   - Download the private key
-   - Copy the `.env.example` file to `.env` and update with your GitHub App details:
-     ```
-     GITHUB_APP_ID=<your-app-id>
-     GITHUB_INSTALLATION_ID=<your-installation-id>
-     GITHUB_WEBHOOK_SECRET=<your-webhook-secret>
-     TEST_MODE=true  # For easier local development
-     ```
-
-4. **Set up local PostgreSQL**:
+3. **Generate TLS certificates** for secure communication:
    ```bash
-   # Start local PostgreSQL database
-   docker-compose up -d postgres
-   
-   # Initialize database schema
-   cat db/init.sql | docker exec -i $(docker-compose ps -q postgres) psql -U secretsuser -d secretsdb
+   ./test-tls-cert-creation.sh
    ```
 
-### Running the Application Locally
+4. **Set up environment variables**:
+   ```bash
+   cp .env.example .env
+   # Edit .env with your configuration
+   ```
 
-1. **Run with Docker Compose (easiest method)**:
+5. **Set up a local GitHub App** for testing:
+   - Create a new GitHub App in your personal GitHub account
+   - Set permissions and webhook URL (can use ngrok)
+   - Download the private key and update your .env file
+
+### Running the Services Locally
+
+1. **Using Docker Compose**:
    ```bash
    # Start all services
    docker-compose up -d
@@ -68,93 +273,37 @@ This architecture uses a managed database (e.g., AWS Aurora PostgreSQL, Azure Da
    docker-compose logs -f
    ```
 
-2. **Run the services directly for development**:
+2. **Running individual services** for development:
    ```bash
-   # Terminal 1: Run the validation service
+   # Run the validation service
    cd cmd/service
    go run main.go
    
-   # Terminal 2: Run the GitHub App
+   # Run the GitHub App
    cd cmd/app
    go run main.go
    ```
 
-3. **Expose webhook endpoint with ngrok**:
+3. **Expose webhook endpoint** for testing with GitHub:
    ```bash
-   # Install ngrok if you haven't already
-   # Expose local port 3000 to the internet
+   # Using ngrok to expose local port 3000
    ngrok http 3000
    
    # Update your GitHub App's webhook URL with the ngrok URL
    # e.g., https://a1b2c3d4.ngrok.io/webhook
    ```
 
-### Local Testing with Mock Webhooks
+### Debug and Testing Tools
 
-For development without connecting to GitHub:
+The repository includes several scripts for testing and debugging:
 
-1. **Enable test mode in your `.env` file**:
-   ```
-   TEST_MODE=true
-   MOCK_FILES_MODE=true
-   ```
+- `test_full_file_analysis.sh` - Tests full file analysis mode
+- `diff-test-script.sh` - Tests diff-only mode
+- `test-ghas-integration.sh` - Tests GitHub Advanced Security integration
+- `test-secure-service-comms.sh` - Tests secure communication between services
+- `debug-test-script` - Helps debug and trace issues with the application
 
-2. **Use the test scripts to send mock webhooks**:
-   ```bash
-   # Test a push event
-   ./test_webhook.sh
-   
-   # Test secret detection
-   ./test_secrets.sh
-   ```
-
-3. **Manually test the validation endpoint**:
-   ```bash
-   curl -X POST http://localhost:8080/validate \
-     -H "Content-Type: application/json" \
-     -d '{"content":"-----BEGIN CERTIFICATE-----\nMIIDazCCAlOgAwIBAgIUXQzF4d4eXBYyGcQf3RJVsEZ1eQ8wDQYJKoZIhvcNAQEL\n-----END CERTIFICATE-----"}'
-   ```
-
-### Developing with Kubernetes
-
-1. **Install Kind (Kubernetes in Docker) if you haven't already**:
-   ```bash
-   go install sigs.k8s.io/kind@latest
-   ```
-
-2. **Create a local cluster**:
-   ```bash
-   kind create cluster --name secrets-detector
-   ```
-
-3. **Build and load the Docker images into Kind**:
-   ```bash
-   # Build the images
-   docker build -t secrets-detector/github-app:dev -f Dockerfile.app .
-   docker build -t secrets-detector/validation-service:dev -f Dockerfile.service .
-   
-   # Load the images into Kind
-   kind load docker-image secrets-detector/github-app:dev --name secrets-detector
-   kind load docker-image secrets-detector/validation-service:dev --name secrets-detector
-   ```
-
-4. **Deploy to the local cluster**:
-   ```bash
-   # Create namespace
-   kubectl create namespace secrets-dev
-   
-   # Install chart with development values
-   helm install secrets-detector ./secrets-detector \
-     -f ./secrets-detector/environments/dev.yaml \
-     -n secrets-dev
-   ```
-
-5. **Forward ports for local testing**:
-   ```bash
-   kubectl port-forward -n secrets-dev svc/secrets-detector-github-app 3000:80
-   ```
-
-## Testing
+## 🧪 Testing
 
 ### Running Tests
 
@@ -169,7 +318,7 @@ For development without connecting to GitHub:
 
 2. **Integration tests**:
    ```bash
-   # Start the required services for integration tests
+   # Start required services
    docker-compose up -d postgres
    
    # Run integration tests
@@ -178,14 +327,14 @@ For development without connecting to GitHub:
 
 3. **End-to-end tests**:
    ```bash
-   # Run E2E tests that simulate GitHub webhooks
+   # Run E2E tests with simulated GitHub webhooks
    ./test_full_file_analysis.sh
-   ./test_diff_mode.sh
+   ./diff-test-script.sh
    ```
 
 ### Test Coverage
 
-Generate test coverage reports:
+Generate and view test coverage reports:
 
 ```bash
 # Generate coverage report
@@ -195,10 +344,12 @@ go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 ```
 
-### Code Quality Checks
+### Code Quality
+
+Ensure code quality with linting tools:
 
 ```bash
-# Install golangci-lint if you haven't already
+# Install golangci-lint
 go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
 # Run linting
@@ -208,47 +359,51 @@ golangci-lint run
 gosec ./...
 ```
 
-## Building and Releasing
+## 🔒 Security
 
-### Building Docker Images
+### TLS Configuration
 
-```bash
-# Build the GitHub App
-docker build -t secrets-detector/github-app:latest -f Dockerfile.app .
+The application supports TLS and mutual TLS (mTLS) for secure communication between services:
 
-# Build the Validation Service
-docker build -t secrets-detector/validation-service:latest -f Dockerfile.service .
+1. **Generate certificates** for development:
+   ```bash
+   ./test-tls-cert-creation.sh
+   ```
 
-# Tag with version number for release
-docker tag secrets-detector/github-app:latest secrets-detector/github-app:v1.0.0
-docker tag secrets-detector/validation-service:latest secrets-detector/validation-service:v1.0.0
-```
+2. **Configure TLS** in the docker-compose.yaml file:
+   ```yaml
+   environment:
+     - TLS_ENABLED=true
+     - TLS_CERT_FILE=/app/certs/server.crt
+     - TLS_KEY_FILE=/app/certs/server.key
+   ```
 
-### Publishing Helm Chart
+3. **Enable mutual TLS** for service-to-service authentication:
+   ```yaml
+   environment:
+     - MTLS_ENABLED=true
+     - CA_CERT_FILE=/app/certs/ca.crt
+   ```
 
-```bash
-# Package the Helm chart
-helm package ./secrets-detector -d ./charts
+### Secure Service Communication
 
-# Update the Helm repository index
-helm repo index ./charts
-```
+The services communicate securely using:
 
-## Contribution Guide
+1. **mTLS** - Both services authenticate each other using certificates
+2. **API Key Authentication** - The GitHub App must provide a valid API key when calling the Validation Service
+3. **Secure HTTP Headers** - Only specific HTTP headers are allowed
 
-We welcome contributions to the Secrets Detector project! This guide will help you get started.
+### Secrets Storage
 
-### Code of Conduct
+Sensitive information is handled securely:
 
-Please read and follow our [Code of Conduct](CODE_OF_CONDUCT.md).
+1. **GitHub App Private Keys** - Stored as Kubernetes secrets or in external secret managers
+2. **Database Credentials** - Stored as Kubernetes secrets or in external secret managers
+3. **Webhook Secrets** - Used to validate incoming webhooks from GitHub
 
-### Getting Started
+## 👥 Contributing
 
-1. **Fork the repository** on GitHub
-2. **Clone your fork** locally
-3. **Create a new branch** from the `main` branch
-4. **Make your changes**
-5. **Submit a pull request**
+We welcome contributions to improve the Secrets Detector! Here's how to get started:
 
 ### Development Workflow
 
@@ -261,619 +416,30 @@ Please read and follow our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ### Pull Request Process
 
-1. **Check the guidelines**:
-   - Create a descriptive title that summarizes the change
-   - Reference the related issue(s)
-   - Update documentation and tests
-
-2. **Code Review**:
-   - A maintainer will review your code
-   - Address any feedback or questions
-   - Make requested changes
-
-3. **Continuous Integration**:
-   - Ensure all CI checks pass
-   - Fix any issues that arise
-
-4. **Merging**:
-   - A maintainer will merge your PR once approved
-   - Your contribution will be included in the next release
+1. **Create a descriptive pull request** that references related issues
+2. **Ensure all tests pass** and code quality checks succeed
+3. **Update documentation** as needed
+4. **Wait for code review** from maintainers
+5. **Address any feedback** from the review
+6. **Maintainers will merge** approved pull requests
 
 ### Coding Standards
 
 1. **Go Code**:
-   - Follow the [Go Code Review Comments](https://github.com/golang/go/wiki/CodeReviewComments)
+   - Follow [Go Code Review Comments](https://github.com/golang/go/wiki/CodeReviewComments)
    - Use `gofmt` to format your code
    - Document exported functions, types, and constants
 
-2. **Helm Chart**:
-   - Follow [Helm Best Practices](https://helm.sh/docs/chart_best_practices/)
-   - Keep templates clean and readable
-   - Use helpers for repetitive code
-
-3. **Commit Messages**:
+2. **Commit Messages**:
    - Use the imperative mood ("Add feature" not "Added feature")
    - Keep the first line under 50 characters
    - Reference issue numbers when applicable
 
-### Testing Requirements
+3. **Testing Requirements**:
+   - Write unit tests for new functionality
+   - Maintain or improve test coverage
+   - Include integration tests for complex features
 
-All contributions must include appropriate tests:
+## 📄 License
 
-1. **New Features**:
-   - Unit tests for isolated functionality
-   - Integration tests for component interaction
-   - End-to-end tests for user workflows
-
-2. **Bug Fixes**:
-   - Tests that reproduce the bug
-   - Tests that verify the fix
-
-3. **Test Coverage**:
-   - Aim for >80% test coverage for new code
-   - Don't break existing tests
-
-### Documentation Requirements
-
-Update documentation for any user-facing changes:
-
-1. **Code Documentation**:
-   - Document all exported types, functions, and methods
-   - Include examples where appropriate
-
-2. **README and User Docs**:
-   - Update user instructions if behavior changes
-   - Add new configuration options to README
-
-3. **Architecture Docs**:
-   - Update architecture diagrams for significant changes
-   - Document design decisions for major features
-
-### Security Considerations
-
-Security is a top priority for this project:
-
-1. **Security Review**:
-   - All code that handles sensitive information will undergo security review
-   - Secret handling code must follow security best practices
-
-2. **Dependency Management**:
-   - Keep dependencies up to date
-   - Avoid adding unnecessary dependencies
-
-3. **Vulnerability Reporting**:
-   - If you discover a security vulnerability, please follow our [Security Policy](SECURITY.md)
-   - Do not report security vulnerabilities via public GitHub issues
-
-### License
-
-By contributing to this project, you agree that your contributions will be licensed under the project's [MIT License](LICENSE).
-
-## Installation
-
-### Creating the GitHub App
-
-Before deploying the Helm chart, you need to create a GitHub App in your organization:
-
-1. In your GitHub organization, go to Settings → Developer settings → GitHub Apps → New GitHub App
-2. Configure your app with the following settings:
-   - **Name**: Secrets Detector
-   - **Homepage URL**: Your organization's URL
-   - **Webhook URL**: Leave blank temporarily - we'll update after deployment
-   - **Webhook Secret**: Generate a secure random string (use a password generator with 32+ characters)
-   - **Permissions**:
-     - Repository permissions:
-       - **Contents**: Read-only (needed to read repository content)
-       - **Metadata**: Read-only
-       - **Pull requests**: Read-only
-     - Organization permissions:
-       - **Members**: Read-only
-   - **Subscribe to events**:
-     - Push
-     - Pull request
-3. Create the app and note your:
-   - App ID
-   - Installation ID (after installing the app to your org)
-   - Generate and download a private key
-
-> **Security Note**: Store the private key securely. Treat it as a critical secret and never commit it to version control.
-   
-### Securely Storing GitHub App Credentials
-
-For production environments, store your GitHub App credentials securely:
-
-**Option 1: Using Kubernetes Secrets with RBAC (basic approach)**
-
-```bash
-# Create a namespace with restricted access
-kubectl create namespace secrets-detector
-
-# Create secret
-kubectl create secret generic github-app-credentials \
-  --namespace secrets-detector \
-  --from-file=github.pem=/path/to/private-key.pem \
-  --from-literal=webhook-secret=your-webhook-secret \
-  --from-literal=app-id=your-app-id \
-  --from-literal=installation-id=your-installation-id
-
-# Restrict access to the namespace using RBAC
-cat <<EOF | kubectl apply -f -
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: secrets-manager
-  namespace: secrets-detector
-rules:
-- apiGroups: [""]
-  resources: ["secrets"]
-  verbs: ["get", "list"]
-  resourceNames: ["github-app-credentials"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: secrets-manager-binding
-  namespace: secrets-detector
-subjects:
-- kind: ServiceAccount
-  name: secrets-detector
-  namespace: secrets-detector
-roleRef:
-  kind: Role
-  name: secrets-manager
-  apiGroup: rbac.authorization.k8s.io
-EOF
-```
-
-**Option 2: Using AWS Secrets Manager (recommended for production)**
-
-```bash
-# Store secrets in AWS Secrets Manager
-aws secretsmanager create-secret \
-  --name github-app-secrets \
-  --secret-string '{"webhook-secret":"your-webhook-secret","app-id":"your-app-id","installation-id":"your-installation-id"}'
-
-# Upload the private key separately
-aws secretsmanager put-secret-value \
-  --secret-id github-app-secrets \
-  --secret-binary fileb:///path/to/private-key.pem
-```
-
-Then install [External Secrets Operator](https://external-secrets.io/) to sync with Kubernetes:
-
-```bash
-# Install External Secrets Operator
-helm repo add external-secrets https://charts.external-secrets.io
-helm install external-secrets external-secrets/external-secrets \
-  -n external-secrets --create-namespace
-
-# Configure the External Secret
-cat <<EOF | kubectl apply -f -
-apiVersion: external-secrets.io/v1beta1
-kind: ExternalSecret
-metadata:
-  name: github-app-credentials
-  namespace: secrets-detector
-spec:
-  refreshInterval: "1h"
-  secretStoreRef:
-    name: aws-secretsmanager
-    kind: ClusterSecretStore
-  target:
-    name: github-app-credentials
-  data:
-  - secretKey: webhook-secret
-    remoteRef:
-      key: github-app-secrets
-      property: webhook-secret
-  - secretKey: app-id
-    remoteRef:
-      key: github-app-secrets
-      property: app-id
-  - secretKey: installation-id
-    remoteRef:
-      key: github-app-secrets
-      property: installation-id
-  - secretKey: github.pem
-    remoteRef:
-      key: github-app-secrets
-      property: github.pem
-EOF
-```
-
-**Option 3: Hashicorp Vault (for multi-cloud or hybrid environments)**
-
-```bash
-# Assuming Vault is installed via the Helm chart
-kubectl exec -it vault-0 -- /bin/sh
-
-# Inside vault pod
-vault kv put secret/github-app/credentials \
-  webhook-secret="your-webhook-secret" \
-  app-id="your-app-id" \
-  installation-id="your-installation-id" \
-  private-key=@/path/to/private-key.pem
-```
-
-### Database Credentials Management
-
-For production, use a similar approach to secure database credentials:
-
-```bash
-# For AWS RDS with IAM authentication (recommended)
-aws secretsmanager create-secret \
-  --name rds-credentials \
-  --secret-string '{"username":"dbuser","password":"strong-password","host":"your-db.cluster-id.region.rds.amazonaws.com","port":"5432","dbname":"secretsdb"}'
-```
-
-### Deploying the Helm Chart
-
-1. Clone the repository:
-
-```bash
-git clone https://github.com/your-org/secrets-detector.git
-cd secrets-detector
-```
-
-2. Deploy to the development environment:
-
-```bash
-# Create namespace
-kubectl create namespace secrets-dev
-
-# Install chart with development values
-helm install secrets-detector ./secrets-detector \
-  -f ./secrets-detector/environments/dev.yaml \
-  -n secrets-dev
-```
-
-3. Deploy to production:
-
-```bash
-# Create namespace
-kubectl create namespace secrets-prod
-
-# Install chart with production values
-helm install secrets-detector ./secrets-detector \
-  -f ./secrets-detector/environments/prod.yaml \
-  -n secrets-prod \
-  --set database.host=your-db-host.rds.amazonaws.com \
-  --set database.credentialsSecret=prod-db-credentials \
-  --set githubApp.githubSecret.existingSecret=github-app-credentials
-```
-
-4. Update the webhook URL in your GitHub App settings once the ingress is provisioned:
-   - Get your ingress URL: `kubectl get ingress -n secrets-prod`
-   - Add `/webhook` path to the URL and update in GitHub App settings
-
-## Configuration
-
-### Environment-specific Values
-
-This chart supports multiple environments through values files:
-
-- `values.yaml` - Default configuration
-- `environments/dev.yaml` - Development environment
-- `environments/test.yaml` - Test environment
-- `environments/staging.yaml` - Staging environment
-- `environments/prod.yaml` - Production environment
-
-To use:
-
-```bash
-helm install secrets-detector ./secrets-detector -f ./secrets-detector/environments/prod.yaml -n prod
-```
-
-### Important Production Settings
-
-For production deployments, ensure you set:
-
-1. **Database Configuration**
-   ```yaml
-   database:
-     host: "prod-aurora-postgres.rds.amazonaws.com"
-     credentialsSecret: "prod-db-credentials"
-   ```
-
-2. **GitHub App Credentials**
-   ```yaml
-   githubApp:
-     githubSecret:
-       existingSecret: "github-app-credentials"
-   ```
-
-3. **Ingress Configuration**
-   ```yaml
-   ingress:
-     enabled: true
-     className: "alb" # Or appropriate for your cluster
-     annotations:
-       kubernetes.io/ingress.class: alb
-       alb.ingress.kubernetes.io/scheme: internet-facing
-       alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
-       alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:region:account-id:certificate/cert-id"
-   ```
-
-## Enterprise Security Best Practices
-
-### Private Key Security
-
-- **Never commit private keys** to your repository
-- Use a secrets management system (AWS Secrets Manager, HashiCorp Vault, etc.)
-- Rotate keys every 60-90 days (GitHub recommends this for Apps)
-- Implement key rotation without downtime:
-  
-  ```bash
-  # 1. Generate new private key in GitHub App settings
-  # 2. Store the new key in your secrets management system
-  # 3. Update the Kubernetes secret with both old and new keys
-  kubectl create secret generic github-app-credentials-new \
-    --from-file=github.pem=/path/to/new-private-key.pem \
-    --from-literal=webhook-secret=your-webhook-secret \
-    --from-literal=app-id=your-app-id \
-    --from-literal=installation-id=your-installation-id
-  
-  # 4. Update the deployment to use the new secret
-  kubectl patch deployment secrets-detector-github-app -n secrets-prod \
-    -p '{"spec":{"template":{"spec":{"volumes":[{"name":"keys-volume","secret":{"secretName":"github-app-credentials-new"}}]}}}}'
-  
-  # 5. After verifying everything works, delete the old key from GitHub
-  ```
-
-### Webhook Security
-
-1. **Always use HTTPS** for webhook endpoints
-2. Use a **strong webhook secret** (32+ random characters)
-3. Validate the webhook signature in your code
-4. Protect your webhook endpoint with network policies
-5. Consider using a WAF in front of your webhook endpoint
-   ```yaml
-   # In values.yaml for AWS WAF
-   ingress:
-     annotations:
-       alb.ingress.kubernetes.io/wafv2-acl-arn: "arn:aws:wafv2:region:account-id:regional/webacl/name/id"
-   ```
-
-### Network Security
-
-1. **Restrict Pod Communication** with NetworkPolicies:
-   ```yaml
-   apiVersion: networking.k8s.io/v1
-   kind: NetworkPolicy
-   metadata:
-     name: github-app-network-policy
-     namespace: secrets-prod
-   spec:
-     podSelector:
-       matchLabels:
-         app.kubernetes.io/component: github-app
-     policyTypes:
-     - Ingress
-     - Egress
-     ingress:
-     - from:
-       - namespaceSelector:
-           matchLabels:
-             name: ingress-controller
-     egress:
-     - to:
-       - podSelector:
-           matchLabels:
-             app.kubernetes.io/component: validation-service
-     - to:
-       # Allow GitHub API access
-       - ipBlock:
-           cidr: 0.0.0.0/0
-         ports:
-         - port: 443
-           protocol: TCP
-   ```
-
-2. **Secure Database Connection**:
-   - Use SSL/TLS for database connections (verify-full mode)
-   - Store database credentials in a secure secret manager
-   - Ensure database is not publicly accessible
-   - Use IAM authentication for AWS RDS when possible
-   - Configure appropriate security groups or VPC endpoints
-
-### RBAC Configuration
-
-Apply the principle of least privilege to your Kubernetes RBAC:
-
-```yaml
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: secrets-detector
-  namespace: secrets-prod
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: secrets-detector-role
-  namespace: secrets-prod
-rules:
-- apiGroups: [""]
-  resources: ["secrets"]
-  verbs: ["get"]
-  resourceNames: ["github-app-credentials", "db-credentials"]
-- apiGroups: [""]
-  resources: ["configmaps"]
-  verbs: ["get"]
-  resourceNames: ["secrets-detector-config"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: secrets-detector-rolebinding
-  namespace: secrets-prod
-subjects:
-- kind: ServiceAccount
-  name: secrets-detector
-  namespace: secrets-prod
-roleRef:
-  kind: Role
-  name: secrets-detector-role
-  apiGroup: rbac.authorization.k8s.io
-```
-
-### Audit Trail
-
-Enable audit logging to track all interactions with secrets:
-
-```yaml
-githubApp:
-  config:
-    logLevel: info
-    auditEnabled: true
-```
-
-Ship logs to a centralized logging system:
-
-1. **AWS CloudWatch**:
-   - Deploy the CloudWatch agent
-   - Configure log forwarding
-   
-2. **ELK Stack**:
-   - Deploy Filebeat DaemonSet
-   - Configure log shipping to Elasticsearch
-   
-3. **Cloud-based Logging**:
-   - Datadog, New Relic, etc.
-
-### Monitoring and Alerting
-
-Set up monitoring with Prometheus and Grafana:
-
-```bash
-# Install Prometheus stack
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm install prometheus prometheus-community/kube-prometheus-stack \
-  --namespace monitoring --create-namespace
-
-# Create ServiceMonitor for your app
-cat <<EOF | kubectl apply -f -
-apiVersion: monitoring.coreos.com/v1
-kind: ServiceMonitor
-metadata:
-  name: secrets-detector
-  namespace: monitoring
-spec:
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: secrets-detector
-  namespaceSelector:
-    matchNames:
-      - secrets-prod
-  endpoints:
-  - port: http
-    interval: 30s
-    path: /metrics
-EOF
-```
-
-Set up alerts for:
-- High error rates
-- Detection of valid secrets
-- Service unavailability
-- Database connectivity issues
-
-### Compliance Considerations
-
-For regulated environments:
-
-1. **Data Retention**:
-   - Configure database retention policies
-   - Set up data lifecycle management
-   
-2. **Access Controls**:
-   - Implement strict RBAC
-   - Use multi-factor authentication for cluster access
-   
-3. **Encryption**:
-   - Enable encryption at rest for database
-   - Use TLS for all communications
-   
-4. **Audit**:
-   - Maintain comprehensive audit logs
-   - Regularly review access patterns
-
-## Disaster Recovery
-
-### Backup and Restore
-
-1. **Database Backup**:
-   - For AWS RDS:
-     ```bash
-     # Create DB snapshot
-     aws rds create-db-snapshot \
-       --db-instance-identifier your-db-identifier \
-       --db-snapshot-identifier backup-$(date +%Y%m%d)
-     ```
-   
-2. **Application Configuration**:
-   - Back up Kubernetes resources:
-     ```bash
-     kubectl get secret github-app-credentials -n secrets-prod -o yaml > github-app-credentials.yaml
-     kubectl get configmap secrets-detector-config -n secrets-prod -o yaml > config.yaml
-     ```
-
-3. **Recovery Procedure**:
-   - Restore database from snapshot
-   - Reapply Kubernetes resources
-   - Verify webhook connectivity
-
-### High Availability
-
-The chart includes configuration for HA deployments:
-
-- Multiple replicas
-- Pod anti-affinity
-- Pod disruption budgets
-- Topology spread constraints
-
-Ensure these are properly configured in your production environment.
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Webhook delivery failures**
-   - Check the Ingress configuration
-   - Verify webhook secret matches GitHub App settings
-   - Inspect GitHub App logs with: `kubectl logs -f -l app.kubernetes.io/component=github-app -n your-namespace`
-
-2. **Database connection failures**
-   - Verify database credentials
-   - Check if database is accessible from the cluster
-   - Check network policies allowing database communication
-
-3. **Scaling issues**
-   - Check HPA metrics with: `kubectl get hpa -n your-namespace`
-   - Verify resource requests and limits are set appropriately
-
-### Logging
-
-Access logs for debugging:
-
-```bash
-# GitHub App logs
-kubectl logs -f -l app.kubernetes.io/component=github-app -n secrets-prod
-
-# Validation Service logs
-kubectl logs -f -l app.kubernetes.io/component=validation-service -n secrets-prod
-```
-
-## Upgrading
-
-To upgrade the chart:
-
-```bash
-helm upgrade secrets-detector ./secrets-detector -f ./secrets-detector/environments/prod.yaml -n prod
-```
-
-For major version upgrades, always check the upgrade notes in CHANGELOG.md.
-
-## License
-
-This chart is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
