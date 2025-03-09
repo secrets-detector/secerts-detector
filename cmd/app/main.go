@@ -1156,6 +1156,191 @@ func (app *SecretDetectorApp) HandleWebhook(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusOK)
 }
 
+// Add these functions to cmd/app/main.go after the existing HandleWebhook function
+
+// HandleGitHubAdvancedSecurityPushProtection handles requests from GitHub Advanced Security
+// for pre-receive push protection analysis
+func (app *SecretDetectorApp) HandleGitHubAdvancedSecurityPushProtection(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	app.logger.Info("Received GitHub Advanced Security push protection request")
+
+	ctx := r.Context()
+
+	// Parse the GitHub Advanced Security push protection request
+	var req struct {
+		// Repository info
+		Repository struct {
+			Owner string `json:"owner"`
+			Name  string `json:"name"`
+		} `json:"repository"`
+		// Content to analyze
+		Content     string `json:"content"`
+		ContentType string `json:"content_type"` // "file", "commit_message", etc.
+		Filename    string `json:"filename,omitempty"`
+		Ref         string `json:"ref,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		app.logger.Error("Error decoding push protection request: %v", err)
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Validate the content
+	findings, err := app.validateContent(ctx, req.Content)
+	if err != nil {
+		app.logger.Error("Error validating content: %v", err)
+		http.Error(w, "Error validating content", http.StatusInternalServerError)
+		return
+	}
+
+	// Prepare GitHub Advanced Security response format
+	type SecretLocation struct {
+		StartLine   int `json:"start_line"`
+		StartColumn int `json:"start_column"`
+		EndLine     int `json:"end_line"`
+		EndColumn   int `json:"end_column"`
+	}
+
+	type DetectedSecret struct {
+		Type               string         `json:"type"`
+		Location           SecretLocation `json:"location"`
+		Secret             string         `json:"secret"`
+		ValidatedAs        string         `json:"validated_as,omitempty"`
+		IsValid            bool           `json:"is_valid"`
+		RecommendedActions []string       `json:"recommended_actions,omitempty"`
+	}
+
+	type PushProtectionResponse struct {
+		Allow               bool             `json:"allow"`
+		BlockingFindings    []DetectedSecret `json:"blocking_findings,omitempty"`
+		NonBlockingFindings []DetectedSecret `json:"non_blocking_findings,omitempty"`
+		Message             string           `json:"message,omitempty"`
+	}
+
+	// Prepare response
+	response := PushProtectionResponse{
+		Allow:   true, // Default to allow
+		Message: "No secrets detected",
+	}
+
+	// If we have valid findings and blocking is enabled, add them as blocking findings
+	if len(findings) > 0 {
+		// Log what we found
+		app.logger.Info("Found %d potential secrets in push", len(findings))
+
+		validCount := 0
+		for _, finding := range findings {
+			if finding.IsValid {
+				validCount++
+			}
+		}
+
+		if validCount > 0 && app.blockCommits {
+			response.Allow = false
+			response.Message = fmt.Sprintf("Push blocked: Found %d valid secrets", validCount)
+
+			// Record detection in database if possible
+			if app.db != nil {
+				repoModel := &models.Repository{
+					Name: req.Repository.Name,
+					Owner: &models.Owner{
+						Login: req.Repository.Owner,
+						Type:  "User", // Default, will be overridden if known
+					},
+				}
+
+				for _, finding := range findings {
+					if finding.IsValid {
+						app.logger.Warn("BLOCKING: Found valid %s in push", finding.Type)
+						// Log to database - we don't have a commit hash so use ref or "push-protection"
+						commitRef := req.Ref
+						if commitRef == "" {
+							commitRef = "push-protection"
+						}
+
+						err := app.db.RecordDetection(
+							ctx,
+							repoModel,
+							finding,
+							commitRef,
+						)
+
+						if err != nil {
+							app.logger.Error("Error recording detection: %v", err)
+						}
+					}
+				}
+			}
+		}
+
+		// Add findings to response
+		for _, finding := range findings {
+			// Simplistic conversion from flat index to line/column
+			// In a real implementation, this would parse the text properly
+			startLine := 1
+			startCol := finding.StartPos
+			endLine := 1
+			endCol := finding.EndPos
+
+			// Count newlines to determine actual line numbers
+			for i := 0; i < finding.StartPos && i < len(req.Content); i++ {
+				if req.Content[i] == '\n' {
+					startLine++
+					startCol = 0
+				} else {
+					startCol++
+				}
+			}
+
+			endLine = startLine
+			endCol = startCol + (finding.EndPos - finding.StartPos)
+
+			// Count newlines between start and end
+			for i := finding.StartPos; i < finding.EndPos && i < len(req.Content); i++ {
+				if req.Content[i] == '\n' {
+					endLine++
+					endCol = 0
+				} else {
+					endCol++
+				}
+			}
+
+			secret := DetectedSecret{
+				Type: finding.Type,
+				Location: SecretLocation{
+					StartLine:   startLine,
+					StartColumn: startCol,
+					EndLine:     endLine,
+					EndColumn:   endCol,
+				},
+				Secret:      finding.Value,
+				ValidatedAs: finding.Type,
+				IsValid:     finding.IsValid,
+				RecommendedActions: []string{
+					"Revoke this secret immediately",
+					"Rotate any associated credentials",
+					"Use a secure secret storage solution",
+				},
+			}
+
+			if finding.IsValid && app.blockCommits {
+				response.BlockingFindings = append(response.BlockingFindings, secret)
+			} else {
+				response.NonBlockingFindings = append(response.NonBlockingFindings, secret)
+			}
+		}
+	}
+
+	// Send response
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
 func (app *SecretDetectorApp) HandleValidate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -1352,6 +1537,7 @@ func main() {
 
 	http.HandleFunc("/webhook", app.HandleWebhook)
 	http.HandleFunc("/validate", app.HandleValidate)
+	http.HandleFunc("/api/v1/push-protection", app.HandleGitHubAdvancedSecurityPushProtection)
 
 	listenAddr := ":8080"
 	logger.Info("Starting server on %s", listenAddr)

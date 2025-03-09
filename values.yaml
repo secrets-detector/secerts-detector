@@ -64,7 +64,9 @@ githubApp:
     logLevel: debug
     testMode: true
     fullFileAnalysis: false
-    blockCommits: false
+    blockCommits: true              # Block commits with secrets
+    advancedSecurityEnabled: true   # Enable GitHub Advanced Security integration
+    advancedSecuritySecret: ""      # Secret shared with GitHub for validation
   githubSecret:
     # Set to true to use existing secret
     existingSecret: ""

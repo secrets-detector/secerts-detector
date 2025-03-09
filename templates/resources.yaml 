@@ -137,6 +137,14 @@ spec:
                   name: {{ include "secrets-detector.fullname" . }}-db
                   {{- end }}
                   key: DB_PASSWORD
+                        # GitHub Advanced Security Integration
+            - name: GITHUB_ADVANCED_SECURITY_ENABLED
+              value: {{ .Values.githubApp.config.advancedSecurityEnabled | quote }}
+            - name: GITHUB_ADVANCED_SECURITY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "secrets-detector.githubSecretName" . }}
+                  key: advanced-security-secret
           volumeMounts:
             - name: config-volume
               mountPath: /app/config

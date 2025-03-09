@@ -72,6 +72,10 @@ services:
       - DB_USER=secretsuser
       - DB_PASSWORD=secretspass
       - DB_NAME=secretsdb
+      # GitHub Advanced Security Integration
+      - GITHUB_ADVANCED_SECURITY_ENABLED=true
+      - GITHUB_ADVANCED_SECURITY_SECRET=your-shared-secret-here
+      - BLOCK_COMMITS=true  # Enable push protection
     depends_on:
       - validation-service
       - postgres
