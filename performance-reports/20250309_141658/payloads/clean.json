@@ -1,0 +1,10 @@
+{
+  "repository": {
+    "owner": "test-org",
+    "name": "test-repo"
+  },
+  "content": "# Configuration\nlog_level: debug\nport: 8080\nhost: 'localhost'\nretry_attempts: 3\nallowed_users: ['admin', 'developer']\ndatabase_url: 'postgres://user:placeholder@localhost:5432/mydb'\n\n# No certificates or private keys in this file",
+  "content_type": "file",
+  "filename": "config.yaml",
+  "ref": "refs/heads/main"
+}

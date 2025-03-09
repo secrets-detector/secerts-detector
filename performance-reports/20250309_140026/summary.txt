@@ -1,0 +1,27 @@
+GHAS Performance Test Summary
+============================
+Test conducted on Sun Mar  9 14:01:33 CDT 2025
+
+Summary:
+  Total Requests:     2633
+  Test Duration: 0 seconds
+  Transactions Per Second:  TPS
+
+Response Time (ms):
+  Minimum:  ms
+  Maximum:  ms
+  Average: -1 ms
+  50th Percentile (P50):  ms
+  90th Percentile (P90):  ms
+  95th Percentile (P95):  ms
+  99th Percentile (P99):  ms
+
+Results:
+  Allowed: 0 (0%)
+  Blocked: 0 (0%)
+  Error: 0 (0%)
+
+Payload Distribution:
+  Clean: 0 (0%)
+  Dummy Secret: 0 (0%)
+  Real Secret: 0 (0%)
