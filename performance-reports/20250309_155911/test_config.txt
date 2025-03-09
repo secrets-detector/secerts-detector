@@ -1,0 +1,8 @@
+Target URL http://localhost:3000/api/v1/push-protection
+Concurrency 100
+Duration 300
+Ramp-up 5
+Timeout 10
+Clean 30%
+Dummy 30%
+Real 40%

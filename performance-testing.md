@@ -2,27 +2,29 @@
 
 ## Overview
 
-This document provides instructions for using the GHAS (GitHub Advanced Security) Performance Testing script to evaluate the performance of the Secrets Detector's push protection endpoint. The script simulates multiple concurrent users sending different types of payloads to measure transaction throughput and response times.
+This document provides instructions for using the GHAS (GitHub Advanced Security) Performance Testing script to evaluate the performance of the Secrets Detector's push protection endpoint. The Python script simulates multiple concurrent users sending different types of payloads to measure transaction throughput and response times with high precision.
 
 ## Requirements
 
-- Bash (version 4.0+)
-- cURL
-- bc (Basic Calculator)
-- Optional: gnuplot (for generating response time graphs)
+- Python 3.7+ 
+- Required Python packages:
+  - aiohttp
+  - pandas
+  - matplotlib
+  - jinja2
 
 ## Installation
 
 1. Download the performance testing script:
 
 ```bash
-curl -o ghas-performance-test.sh https://raw.githubusercontent.com/S-Corkum/secerts-detector/main/tools/ghas-performance-test.sh
+curl -o ghas_performance_test.py https://raw.githubusercontent.com/S-Corkum/secerts-detector/main/tools/ghas_performance_test.py
 ```
 
-2. Make it executable:
+2. Install required dependencies:
 
 ```bash
-chmod +x ghas-performance-test.sh
+pip install aiohttp pandas matplotlib jinja2
 ```
 
 ## Basic Usage
@@ -30,7 +32,7 @@ chmod +x ghas-performance-test.sh
 Run the script with default parameters:
 
 ```bash
-./ghas-performance-test.sh
+python ghas_performance_test.py
 ```
 
 By default, this will:
@@ -45,7 +47,7 @@ The script supports various command-line options to customize the test:
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-h, --host HOST` | Target host | `localhost` |
+| `-H, --host HOST` | Target host | `localhost` |
 | `-p, --port PORT` | Target port | `3000` |
 | `-e, --endpoint ENDPOINT` | Target endpoint | `/api/v1/push-protection` |
 | `-s, --secure` | Use HTTPS instead of HTTP | HTTP |
@@ -62,17 +64,17 @@ The script supports various command-line options to customize the test:
 
 Test against a production server with HTTPS:
 ```bash
-./ghas-performance-test.sh --host api.example.com --secure
+python ghas_performance_test.py --host api.example.com --secure
 ```
 
 Run a high-load test:
 ```bash
-./ghas-performance-test.sh --concurrency 100 --duration 300
+python ghas_performance_test.py --concurrency 100 --duration 300
 ```
 
 Focus on edge cases with mostly real secrets:
 ```bash
-./ghas-performance-test.sh --clean 10 --dummy 10 --real 80
+python ghas_performance_test.py --clean 10 --dummy 10 --real 80
 ```
 
 ## Understanding Test Payloads
@@ -91,20 +93,20 @@ You can adjust the distribution of these payloads using the `--clean`, `--dummy`
 
 When you run the script, it:
 
-1. Creates test payloads
+1. Creates asynchronous HTTP sessions for high concurrency
 2. Gradually ramps up simulated users based on your settings
 3. Sends continuous requests during the test duration
-4. Records response times and results
-5. Analyzes the results and generates reports
+4. Records response times and results with microsecond precision
+5. Analyzes the results and generates comprehensive reports
 
 ## Understanding Results
 
 After the test completes, the script generates:
 
-1. **CSV data**: Raw test results
+1. **CSV data**: Raw test results in CSV format for further analysis
 2. **Text summary**: Key metrics like TPS, response times, and result distribution
 3. **HTML report**: Visual representation of test results with tables and charts
-4. **Response time graph**: (If gnuplot is installed) Visual plot of response times
+4. **Response time graphs**: Visual plots showing response time distribution and trends
 
 ### Key Metrics
 
@@ -113,12 +115,23 @@ After the test completes, the script generates:
 - **Result Distribution**: The breakdown of allowed vs. blocked requests
 - **Error Rate**: Percentage of requests that resulted in errors
 
+## Advantages Over the Bash Script
+
+This Python implementation offers several advantages over the previous Bash script:
+
+1. **True Concurrency**: Uses async I/O for efficient, non-blocking concurrent requests
+2. **Accurate Timing**: Measures response times with microsecond precision
+3. **Robust Statistical Analysis**: Uses pandas for reliable data processing and statistics
+4. **Advanced Visualization**: Generates detailed graphs of performance metrics
+5. **Reliable Percentile Calculation**: Properly calculates percentiles using robust statistical methods
+6. **Low Overhead**: Minimal impact from the testing tool itself, giving more accurate results
+
 ## Example Test Scenarios
 
 ### Baseline Performance Test
 
 ```bash
-./ghas-performance-test.sh --concurrency 5 --duration 60
+python ghas_performance_test.py --concurrency 5 --duration 60
 ```
 
 This provides a baseline of performance under moderate load.
@@ -126,7 +139,7 @@ This provides a baseline of performance under moderate load.
 ### Peak Load Test
 
 ```bash
-./ghas-performance-test.sh --concurrency 50 --duration 180 --ramp-up 30
+python ghas_performance_test.py --concurrency 50 --duration 180 --ramp-up 30
 ```
 
 This simulates a high-load scenario to identify the system's breaking point.
@@ -134,7 +147,7 @@ This simulates a high-load scenario to identify the system's breaking point.
 ### Endurance Test
 
 ```bash
-./ghas-performance-test.sh --concurrency 20 --duration 1800
+python ghas_performance_test.py --concurrency 20 --duration 1800
 ```
 
 This tests the system's stability over a longer period (30 minutes).
@@ -142,7 +155,7 @@ This tests the system's stability over a longer period (30 minutes).
 ### Worst-Case Scenario
 
 ```bash
-./ghas-performance-test.sh --clean 5 --dummy 5 --real 90 --concurrency 30
+python ghas_performance_test.py --clean 5 --dummy 5 --real 90 --concurrency 30
 ```
 
 This tests performance when most payloads contain real secrets (requiring more intensive validation).
@@ -163,32 +176,27 @@ Based on test results, you might consider:
 
 ## Troubleshooting
 
-### Script doesn't execute
-- Ensure the script has execute permissions (`chmod +x ghas-performance-test.sh`)
-- Check that you have Bash version 4.0 or higher
+### No module named error
+- Ensure you've installed all required packages: `pip install aiohttp pandas matplotlib jinja2`
 
-### "Connection refused" errors
+### Connection refused errors
 - Verify the Secrets Detector services are running
 - Check the host and port settings
 - Ensure there are no firewall rules blocking the connection
 
-### "bc command not found" error
-- Install the bc package:
-  - Ubuntu/Debian: `apt-get install bc`
-  - Red Hat/CentOS: `yum install bc`
-  - macOS: `brew install bc`
-
-### Timestamp errors
-- If you see errors related to timestamps, make sure the script is using the compatible `get_time_ms()` function
+### Memory issues with large tests
+- For very large tests, you might need to increase your system's memory limits
+- Consider running with a smaller concurrency value
 
 ## Extending the Script
 
 You can customize the script by:
 
-1. Adding more payload types to test different secret patterns
-2. Adding authentication if your endpoint requires it
-3. Integrating with monitoring tools for deeper performance analysis
-4. Adding distributed testing capabilities
+1. Adding more payload types in the Python code
+2. Modifying the request parameters or headers
+3. Implementing custom analysis functions
+4. Integrating with external monitoring systems
+5. Adding distributed testing capabilities across multiple machines
 
 ## Final Notes
 
