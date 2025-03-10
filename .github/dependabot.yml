@@ -1,0 +1,135 @@
+version: 2
+updates:
+  # Keep Go dependencies up-to-date
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "go"
+    commit-message:
+      prefix: "go"
+      include: "scope"
+    reviewers:
+      - "S-Corkum"
+    ignore:
+      # Ignore patch updates for non-critical dependencies
+      - dependency-name: "*"
+        update-types: ["version-update:semver-patch"]
+    groups:
+      # Group all non-major golang updates together
+      golang-minor:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "github.com/bradleyfalzon/ghinstallation*"
+          - "github.com/gin-gonic/gin"
+        update-types:
+          - "minor"
+          - "patch"
+
+  # Keep Docker base images up-to-date
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "docker"
+      include: "scope"
+    ignore:
+      # Only allow patch updates for Golang Docker images to avoid breaking changes
+      - dependency-name: "golang"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+
+  # Keep Dockerfile.app up-to-date
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "docker"
+      include: "scope"
+
+  # Keep Dockerfile.service up-to-date
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "wednesday"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "docker"
+      include: "scope"
+
+  # Keep Dockerfile.grafana up-to-date
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 2
+    labels:
+      - "dependencies"
+      - "docker"
+      - "grafana"
+    commit-message:
+      prefix: "docker"
+      prefix-development: "grafana"
+      include: "scope"
+
+  # Keep GitHub Actions up-to-date
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+
+  # Keep Helm chart dependencies up-to-date
+  - package-ecosystem: "terraform"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "terraform"
+    commit-message:
+      prefix: "tf"
+      include: "scope"
+
+  # Security vulnerability updates
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "security"
+    commit-message:
+      prefix: "security"
+      include: "scope"
+    # Only security updates, no version updates
+    allow:
+      - dependency-type: "all"
+        update-type: "security"
