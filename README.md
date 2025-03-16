@@ -10,8 +10,8 @@ A security scanning application that detects and validates sensitive information
 - [Architecture](#architecture)
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
-  - [Kubernetes Deployment with Helm](#kubernetes-deployment-with-helm)
   - [Docker Compose Deployment](#docker-compose-deployment)
+  - [Setting Up Your .env File](#setting-up-your-env-file)
 - [Configuration](#configuration)
   - [GitHub App Setup](#github-app-setup)
   - [Environment Variables](#environment-variables)
@@ -63,14 +63,7 @@ The components communicate securely using mutual TLS authentication and API keys
 
 ## 📋 Prerequisites
 
-- **For Kubernetes deployment:**
-  - Kubernetes 1.19+
-  - Helm 3.2.0+
-  - A registered GitHub App with appropriate permissions
-  - A PostgreSQL-compatible database (AWS Aurora PostgreSQL, Azure Database, etc.)
-  - An Ingress controller for webhook endpoint exposure
-
-- **For local development:**
+For local development:
   - Go 1.23+
   - Docker and Docker Compose
   - Git
@@ -78,59 +71,7 @@ The components communicate securely using mutual TLS authentication and API keys
 
 ## 🚀 Installation
 
-### Kubernetes Deployment with Helm
-
-1. **Register a GitHub App** in your organization with the following permissions:
-   - Repository contents: Read
-   - Metadata: Read
-   - Pull requests: Read
-   - Subscribe to events: Push, Pull request
-
-2. **Get your GitHub App credentials**:
-   - App ID
-   - Installation ID
-   - Private key (download and save securely)
-   - Generate a webhook secret
-
-3. **Install using Helm**:
-
-```bash
-# Add the Helm repository (if applicable)
-# helm repo add secrets-detector https://your-helm-repo.example.com
-# helm repo update
-
-# Create namespace
-kubectl create namespace secrets-detector
-
-# Create a secret for GitHub App credentials
-kubectl create secret generic github-app-credentials \
-  --namespace secrets-detector \
-  --from-file=github.pem=/path/to/private-key.pem \
-  --from-literal=webhook-secret=your-webhook-secret \
-  --from-literal=app-id=your-app-id \
-  --from-literal=installation-id=your-installation-id
-
-# Create a secret for database credentials
-kubectl create secret generic db-credentials \
-  --namespace secrets-detector \
-  --from-literal=DB_USER=your-db-user \
-  --from-literal=DB_PASSWORD=your-db-password
-
-# Install the Helm chart
-helm install secrets-detector ./secrets-detector \
-  --namespace secrets-detector \
-  --set database.host=your-db-host.example.com \
-  --set database.credentialsSecret=db-credentials \
-  --set githubApp.githubSecret.existingSecret=github-app-credentials
-```
-
-4. **Configure your GitHub App webhook URL**:
-   - After deployment, get your ingress URL: `kubectl get ingress -n secrets-detector`
-   - Update your GitHub App settings with the webhook URL: `https://your-ingress-url/webhook`
-
 ### Docker Compose Deployment
-
-For development or smaller deployments, you can use Docker Compose:
 
 1. **Clone the repository**:
 ```bash
@@ -141,10 +82,10 @@ cd secrets-detector
 2. **Configure environment variables**:
 ```bash
 cp .env.example .env
-# Edit .env with your GitHub App credentials and other configuration
+# Edit the .env file with your GitHub App credentials and other configuration
 ```
 
-3. **Generate TLS certificates** (if using mTLS):
+3. **Generate TLS certificates** (for secure service communication):
 ```bash
 ./test-tls-cert-creation.sh
 ```
@@ -155,6 +96,74 @@ docker-compose up -d
 ```
 
 5. **Update your GitHub App webhook URL** to point to your Docker host: `http://your-server:3000/webhook`
+
+6. **Access the Grafana dashboard** at `http://localhost:3001` (default credentials: admin/admin)
+
+### Setting Up Your .env File
+
+The `.env` file contains all the configuration settings for the application. Here's a detailed guide to set it up properly:
+
+1. **Copy the example file**:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. **GitHub Authentication**: You must configure at least one of these authentication methods:
+   ```
+   # Option 1: Personal Access Token (simplest method)
+   GITHUB_TOKEN=your_github_token_here
+   
+   # Option 2: GitHub App Authentication
+   GITHUB_APP_ID=12345
+   GITHUB_INSTALLATION_ID=67890
+   ```
+   - For GitHub App authentication, you'll also need to place your private key in `./keys/github.pem`
+
+3. **GitHub Enterprise Configuration** (optional):
+   ```
+   # Only needed for GitHub Enterprise
+   GITHUB_BASE_URL=https://github.yourcompany.com/api/v3/
+   ```
+
+4. **Scanner Configuration**:
+   ```
+   SCANNER_CONCURRENCY=5         # Number of parallel scanning operations
+   SCANNER_BATCH_SIZE=10         # Commits to process in a batch
+   SCANNER_MAX_DEPTH=1000        # Maximum commit history depth 
+   SCANNER_SCAN_PRIVATE=true     # Whether to scan private repositories
+   SCANNER_RATE_LIMIT=5000       # GitHub API rate limit to respect
+   SCANNER_PAUSE_TIME=60         # Pause time in seconds when rate limited
+   ```
+
+5. **Repository Filtering**:
+   ```
+   EXCLUDE_REPOS=archived-repo,test-repo  # Comma-separated list of repos to ignore
+   EXCLUDE_ORGS=third-party-org           # Comma-separated list of orgs to ignore
+   ```
+
+6. **Debug Mode**:
+   ```
+   DEBUG_MODE=false              # Enable for verbose logging
+   ```
+
+7. **Security Settings**:
+   ```
+   # TLS Configuration
+   TLS_ENABLED=true              # Enable TLS for validation service
+   MTLS_ENABLED=true             # Enable mutual TLS for service-to-service auth
+   
+   # Blocking behavior
+   BLOCK_COMMITS=true            # Whether to block commits with real secrets
+   ```
+
+8. **API Keys and Secrets**:
+   ```
+   # Used for service-to-service authentication
+   VALIDATION_API_KEY=your-secure-api-key-here
+   
+   # For GitHub webhook verification
+   GITHUB_WEBHOOK_SECRET=your-webhook-secret-here
+   ```
 
 ## ⚙️ Configuration
 
@@ -172,64 +181,40 @@ docker-compose up -d
 
 2. **Install the app** to your organization or specific repositories
 
+3. **Configure the webhook URL** to point to your Docker host: `http://your-server:3000/webhook`
+
 ### Environment Variables
 
-The application can be configured using environment variables:
+The application can be configured using environment variables (see the .env file setup section above). Key variables include:
 
 **GitHub App:**
 - `GITHUB_APP_ID` - The ID of your GitHub App
 - `GITHUB_INSTALLATION_ID` - The installation ID of your GitHub App
 - `GITHUB_WEBHOOK_SECRET` - Secret used to validate webhook payloads
-- `GITHUB_ENTERPRISE_HOST` - (Optional) For GitHub Enterprise deployments
+- `GITHUB_TOKEN` - Alternative to GitHub App for simpler setup
 - `LOG_LEVEL` - Logging level (debug, info, warn, error)
-- `TEST_MODE` - Enable test mode (true/false)
 - `FULL_FILE_ANALYSIS` - Analyze full files rather than just diffs (true/false)
 - `BLOCK_COMMITS` - Whether to block commits containing secrets (true/false)
 
 **Validation Service:**
-- `GIN_MODE` - Gin framework mode (debug, release)
 - `TLS_ENABLED` - Enable TLS (true/false)
 - `MTLS_ENABLED` - Enable mutual TLS (true/false)
-- `TLS_CERT_FILE` - Path to TLS certificate
-- `TLS_KEY_FILE` - Path to TLS key
-- `CA_CERT_FILE` - Path to CA certificate for mTLS
+- `API_KEY` - API key for service-to-service authentication
 
 **Database:**
-- `DB_HOST` - Database host
-- `DB_PORT` - Database port
-- `DB_USER` - Database username
-- `DB_PASSWORD` - Database password
-- `DB_NAME` - Database name
+- `DB_HOST` - Database host (default: postgres)
+- `DB_PORT` - Database port (default: 5432)
+- `DB_USER` - Database username (default: secretsuser)
+- `DB_PASSWORD` - Database password (default: secretspass)
+- `DB_NAME` - Database name (default: secretsdb)
 
 ### Secrets Management
 
-For production deployments, we recommend using a secure secrets management solution:
+Your `.env` file should never be committed to version control. Here are best practices for managing secrets:
 
-**Kubernetes Secrets with RBAC:**
-```bash
-kubectl create secret generic github-app-credentials \
-  --namespace secrets-detector \
-  --from-file=github.pem=/path/to/private-key.pem \
-  --from-literal=webhook-secret=your-webhook-secret \
-  --from-literal=app-id=your-app-id \
-  --from-literal=installation-id=your-installation-id
-```
-
-**AWS Secrets Manager:**
-```bash
-aws secretsmanager create-secret \
-  --name github-app-secrets \
-  --secret-string '{"webhook-secret":"your-webhook-secret","app-id":"your-app-id","installation-id":"your-installation-id"}'
-```
-
-**HashiCorp Vault:**
-```bash
-vault kv put secret/github-app/credentials \
-  webhook-secret="your-webhook-secret" \
-  app-id="your-app-id" \
-  installation-id="your-installation-id" \
-  private-key=@/path/to/private-key.pem
-```
+1. **Use .gitignore**: Ensure `.env` is included in your `.gitignore` file
+2. **Use environment variables**: For production, prefer environment variables instead of .env files
+3. **Rotate secrets regularly**: Change your GitHub webhook secrets and API keys periodically
 
 ## 💻 Local Development
 
@@ -344,19 +329,22 @@ go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 ```
 
-### Code Quality
+### Integration Testing
 
-Ensure code quality with linting tools:
+You can use the provided scripts to test different aspects of the system:
 
 ```bash
-# Install golangci-lint
-go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+# Test full file analysis mode
+./test_full_file_analysis.sh
 
-# Run linting
-golangci-lint run
+# Test diff analysis mode
+./diff-test-script.sh
 
-# Check for security issues
-gosec ./...
+# Test GitHub Advanced Security integration
+./test-ghas-integration.sh
+
+# Test secure service communication
+./test-secure-service-comms.sh
 ```
 
 ## 🔒 Security
@@ -370,19 +358,17 @@ The application supports TLS and mutual TLS (mTLS) for secure communication betw
    ./test-tls-cert-creation.sh
    ```
 
-2. **Configure TLS** in the docker-compose.yaml file:
-   ```yaml
-   environment:
-     - TLS_ENABLED=true
-     - TLS_CERT_FILE=/app/certs/server.crt
-     - TLS_KEY_FILE=/app/certs/server.key
+2. **Configure TLS** in your .env file:
+   ```
+   TLS_ENABLED=true
+   TLS_CERT_FILE=/app/certs/server.crt
+   TLS_KEY_FILE=/app/certs/server.key
    ```
 
 3. **Enable mutual TLS** for service-to-service authentication:
-   ```yaml
-   environment:
-     - MTLS_ENABLED=true
-     - CA_CERT_FILE=/app/certs/ca.crt
+   ```
+   MTLS_ENABLED=true
+   CA_CERT_FILE=/app/certs/ca.crt
    ```
 
 ### Secure Service Communication
@@ -397,8 +383,8 @@ The services communicate securely using:
 
 Sensitive information is handled securely:
 
-1. **GitHub App Private Keys** - Stored as Kubernetes secrets or in external secret managers
-2. **Database Credentials** - Stored as Kubernetes secrets or in external secret managers
+1. **GitHub App Private Keys** - Stored in `./keys/github.pem` (never commit to version control)
+2. **Database Credentials** - Stored in .env file (never commit to version control)
 3. **Webhook Secrets** - Used to validate incoming webhooks from GitHub
 
 ## 👥 Contributing
