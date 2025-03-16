@@ -51,7 +51,7 @@ services:
       - APP_ENV=development
       - LOG_LEVEL=debug
       # Use HTTPS for validation service
-      - VALIDATION_SERVICE_URL=validation-service:8443
+      - VALIDATION_SERVICE_URL=https://validation-service:8443
       - VALIDATION_API_KEY=${VALIDATION_API_KEY:-default-development-key-do-not-use-in-production}
       # TLS configuration for client
       - TLS_SKIP_VERIFY=false
@@ -82,13 +82,16 @@ services:
     networks:
       - secret-validator-network
 
-  # New scanner service for scanning historical commits
+  # Scanner service for scanning historical commits
   scanner:
     build:
       context: .
       dockerfile: Dockerfile.scanner
     volumes:
       - ./config/config.json:/app/config/config.json
+      - ./certs/ca/ca.crt:/app/certs/ca.crt
+      - ./certs/github-app/github-app.crt:/app/certs/client.crt
+      - ./certs/github-app/github-app.key:/app/certs/client.key
     environment:
       - LOG_LEVEL=debug
       # GitHub Token authentication (from .env)
@@ -110,14 +113,22 @@ services:
       - SCANNER_MAX_DEPTH=${SCANNER_MAX_DEPTH:-1000}
       - SCANNER_SCAN_PRIVATE=${SCANNER_SCAN_PRIVATE:-true}
       - SCANNER_RATE_LIMIT=${SCANNER_RATE_LIMIT:-5000}
-      - SCANNER_PAUSE_TIME=${SCANNER_PAUSE_TIME:-60}
+      - SCANNER_PAUSE_TIME=${SCANNER_PAUSE_TIME:-10}
       # Repository filtering
       - EXCLUDE_REPOS=${EXCLUDE_REPOS:-archived-repo,test-repo}
       - EXCLUDE_ORGS=${EXCLUDE_ORGS:-third-party-org}
       # Debug Mode
       - DEBUG_MODE=${DEBUG_MODE:-false}
+      # TLS configuration
+      - VALIDATION_SERVICE_URL=https://validation-service:8443
+      - TLS_SKIP_VERIFY=false
+      - CA_CERT_FILE=/app/certs/ca.crt
+      - TLS_CLIENT_CERT_FILE=/app/certs/client.crt
+      - TLS_CLIENT_KEY_FILE=/app/certs/client.key
+      - VALIDATION_API_KEY=${VALIDATION_API_KEY:-default-development-key-do-not-use-in-production}
     depends_on:
       - postgres
+      - validation-service
     networks:
       - secret-validator-network
 

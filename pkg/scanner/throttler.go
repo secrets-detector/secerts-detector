@@ -57,17 +57,20 @@ func (t *Throttler) WaitForPermission(ctx context.Context) error {
 	t.mu.Lock()
 	remaining := t.remaining
 	resetTime := t.resetTime
+	limit := t.hourlyLimit
 	t.mu.Unlock()
 
-	// If we have plenty of requests remaining, proceed immediately
-	if remaining > t.hourlyLimit/20 {
+	// Calculate percentage remaining to make decisions more proportional
+	percentRemaining := float64(remaining) / float64(limit) * 100
+
+	// If we have plenty of requests remaining (more than 5%), proceed immediately
+	if percentRemaining > 5 {
 		return nil
 	}
 
-	// If we're low on requests, calculate how long until reset
-	now := time.Now()
-	if remaining <= 5 {
-		timeUntilReset := resetTime.Sub(now)
+	// If we're critically low (less than 1% or fewer than 10 requests), wait until reset
+	if percentRemaining < 1 || remaining < 10 {
+		timeUntilReset := resetTime.Sub(time.Now())
 		if timeUntilReset > 0 {
 			t.logger.Printf("Rate limit critical (%d remaining), pausing until reset in %v",
 				remaining, timeUntilReset.Round(time.Second))
@@ -87,12 +90,18 @@ func (t *Throttler) WaitForPermission(ctx context.Context) error {
 				return ctx.Err()
 			}
 		}
-	} else if remaining < t.hourlyLimit/10 {
-		// We're getting low, but not critical yet - implement backoff strategy
-		t.logger.Printf("Rate limit low (%d remaining), pausing for %v",
-			remaining, t.pauseTime)
+	} else if percentRemaining < 5 {
+		// We're getting low (1-5%), implement adaptive backoff strategy based on remaining percentage
+		// The closer to 1%, the longer we wait
+		adaptiveDelay := time.Duration((5 - percentRemaining) / 4 * float64(t.pauseTime))
+		if adaptiveDelay < time.Second {
+			adaptiveDelay = time.Second
+		}
 
-		timer := time.NewTimer(t.pauseTime)
+		t.logger.Printf("Rate limit low (%.1f%% remaining), pausing for %v",
+			percentRemaining, adaptiveDelay)
+
+		timer := time.NewTimer(adaptiveDelay)
 		defer timer.Stop()
 
 		select {

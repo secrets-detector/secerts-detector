@@ -8,6 +8,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 
 	"secrets-detector/pkg/models"
@@ -52,8 +54,24 @@ func (v *Validator) ValidateContent(ctx context.Context, content string) ([]mode
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
+	// Ensure URL has a proper protocol prefix
+	requestURL := v.url
+	if !strings.HasPrefix(requestURL, "http://") && !strings.HasPrefix(requestURL, "https://") {
+		// Default to HTTPS if TLS is likely enabled (check environment or config)
+		if v.isTLSEnabled() {
+			requestURL = fmt.Sprintf("https://%s", requestURL)
+		} else {
+			requestURL = fmt.Sprintf("http://%s", requestURL)
+		}
+	}
+
+	// Ensure URL has the /validate endpoint
+	if !strings.HasSuffix(requestURL, "/validate") {
+		requestURL = fmt.Sprintf("%s/validate", requestURL)
+	}
+
 	// Create request with context
-	req, err := http.NewRequestWithContext(ctx, "POST", v.url+"/validate", bytes.NewBuffer(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", requestURL, bytes.NewBuffer(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -91,4 +109,18 @@ func (v *Validator) ValidateContent(ctx context.Context, content string) ([]mode
 	}
 
 	return response.Findings, nil
+}
+
+// Helper method to check if TLS is enabled
+func (v *Validator) isTLSEnabled() bool {
+	// Check if the transport has TLS configuration
+	if transport, ok := v.client.Transport.(*http.Transport); ok {
+		return transport.TLSClientConfig != nil
+	}
+
+	// Alternatively, check environment variables
+	_, tlsEnabled := os.LookupEnv("TLS_ENABLED")
+	_, mtlsEnabled := os.LookupEnv("MTLS_ENABLED")
+
+	return tlsEnabled || mtlsEnabled
 }
