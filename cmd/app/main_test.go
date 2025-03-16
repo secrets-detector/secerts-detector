@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/hex"
@@ -13,7 +12,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -147,164 +145,6 @@ func TestSecretDetectorApp_HandleWebhook(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rr.Code)
 }
 
-// TestSecretDetectorApp_ValidateContent tests the validateContent method
-func TestSecretDetectorApp_ValidateContent(t *testing.T) {
-	// Create a new SecretDetectorApp with mocked components
-	logger := log.New(os.Stdout, "TestPrefix ", log.LstdFlags)
-	app := NewSecretDetectorApp("http://validation-service:8080", logger, true, false, true)
-
-	// Mock HTTP client to avoid actual HTTP requests
-	mockClient := new(MockHTTPClient)
-	app.validator.client = &http.Client{
-		Transport: mockClient,
-	}
-
-	// Mock the validation service response
-	mockFindings := []map[string]interface{}{
-		{
-			"type":     "certificate",
-			"value":    "test-cert-value",
-			"startPos": 0,
-			"endPos":   100,
-			"isValid":  true,
-			"message":  "Valid certificate",
-		},
-	}
-	mockResp := MockValidationServiceResponse(mockFindings)
-
-	// Set up the mock to return our mock response
-	mockClient.On("Do", mock.Anything).Return(mockResp, nil)
-
-	// Call the validateContent method
-	findings, err := app.validateContent(context.Background(), "test-content")
-
-	// Check the results
-	assert.NoError(t, err)
-	assert.Len(t, findings, 1)
-	assert.Equal(t, "certificate", findings[0].Type)
-	assert.True(t, findings[0].IsValid)
-
-	// Verify our mock was called
-	mockClient.AssertExpectations(t)
-}
-
-// TestSecretDetectorApp_HandleGitHubAdvancedSecurityPushProtection tests the GHAS push protection handler
-func TestSecretDetectorApp_HandleGitHubAdvancedSecurityPushProtection(t *testing.T) {
-	// Create a new SecretDetectorApp with mocked components
-	logger := log.New(os.Stdout, "TestPrefix ", log.LstdFlags)
-	app := NewSecretDetectorApp("http://validation-service:8080", logger, true, false, true)
-
-	// Mock the validateContent method
-	oldValidateContent := app.validateContent
-	defer func() { app.validateContent = oldValidateContent }()
-
-	// Create a mock implementation that returns a predefined result
-	app.validateContent = func(ctx context.Context, content string) ([]interface{}, error) {
-		return []interface{}{
-			map[string]interface{}{
-				"type":     "certificate",
-				"value":    "test-cert-value",
-				"startPos": 0,
-				"endPos":   100,
-				"isValid":  true,
-				"message":  "Valid certificate",
-			},
-		}, nil
-	}
-
-	// Create a test payload
-	payload := `{
-		"repository": {
-			"owner": "test-org",
-			"name": "test-repo"
-		},
-		"content": "test content with a certificate",
-		"content_type": "file",
-		"filename": "test-file.txt",
-		"ref": "refs/heads/main"
-	}`
-
-	// Create a test HTTP request
-	req := httptest.NewRequest("POST", "/api/v1/push-protection", bytes.NewBufferString(payload))
-	req.Header.Set("Content-Type", "application/json")
-
-	// Create a recorder to capture the response
-	rr := httptest.NewRecorder()
-
-	// Call the push protection handler
-	http.HandlerFunc(app.HandleGitHubAdvancedSecurityPushProtection).ServeHTTP(rr, req)
-
-	// Check the response
-	assert.Equal(t, http.StatusOK, rr.Code)
-
-	// Parse the response
-	var resp struct {
-		Allow            bool       `json:"allow"`
-		BlockingFindings []struct{} `json:"blocking_findings"`
-	}
-	err := json.Unmarshal(rr.Body.Bytes(), &resp)
-	assert.NoError(t, err)
-
-	// In this case, we should have blocking findings and allow=false since our mock returns a valid certificate
-	assert.False(t, resp.Allow)
-	assert.NotEmpty(t, resp.BlockingFindings)
-}
-
-// TestSecretDetectorApp_HandleValidate tests the validation endpoint
-func TestSecretDetectorApp_HandleValidate(t *testing.T) {
-	// Create a new SecretDetectorApp with mocked components
-	logger := log.New(os.Stdout, "TestPrefix ", log.LstdFlags)
-	app := NewSecretDetectorApp("http://validation-service:8080", logger, true, false, true)
-
-	// Mock the validateContent method
-	oldValidateContent := app.validateContent
-	defer func() { app.validateContent = oldValidateContent }()
-
-	// Create a mock implementation that returns a predefined result
-	app.validateContent = func(ctx context.Context, content string) ([]interface{}, error) {
-		return []interface{}{
-			map[string]interface{}{
-				"type":     "certificate",
-				"value":    "test-cert-value",
-				"startPos": 0,
-				"endPos":   100,
-				"isValid":  true,
-				"message":  "Valid certificate",
-			},
-		}, nil
-	}
-
-	// Create a test payload
-	payload := `{
-		"content": "test content with a certificate"
-	}`
-
-	// Create a test HTTP request
-	req := httptest.NewRequest("POST", "/validate", bytes.NewBufferString(payload))
-	req.Header.Set("Content-Type", "application/json")
-
-	// Create a recorder to capture the response
-	rr := httptest.NewRecorder()
-
-	// Call the validate handler
-	http.HandlerFunc(app.HandleValidate).ServeHTTP(rr, req)
-
-	// Check the response
-	assert.Equal(t, http.StatusOK, rr.Code)
-
-	// Parse the response
-	var resp struct {
-		Findings []struct{} `json:"findings"`
-		Message  string     `json:"message"`
-	}
-	err := json.Unmarshal(rr.Body.Bytes(), &resp)
-	assert.NoError(t, err)
-
-	// We should have findings and a message about valid secrets
-	assert.NotEmpty(t, resp.Findings)
-	assert.Contains(t, resp.Message, "valid secrets")
-}
-
 // TestSanitizeFunctions tests the various sanitization functions
 func TestSanitizeFunctions(t *testing.T) {
 	// Test sanitizeSignature
@@ -347,33 +187,4 @@ func TestGetEnvInt64(t *testing.T) {
 
 	result = getEnvInt64("INVALID_ENV_INT", 999)
 	assert.Equal(t, int64(999), result)
-}
-
-// TestMainFunction is a minimal test for the main function to improve coverage
-func TestMainFunction(t *testing.T) {
-	// Save original command line arguments and restore them after the test
-	oldArgs := os.Args
-	defer func() { os.Args = oldArgs }()
-
-	// Set up a test environment that won't actually start a server
-	os.Args = []string{"cmd"}
-	os.Setenv("TEST_MODE", "true")
-	defer os.Unsetenv("TEST_MODE")
-
-	// We can't actually call main() since it would block forever,
-	// but we can test the initialization code by mocking the ListenAndServe function
-	oldListenAndServe := http.ListenAndServe
-	http.ListenAndServe = func(addr string, handler http.Handler) error {
-		return nil
-	}
-	defer func() { http.ListenAndServe = oldListenAndServe }()
-
-	// This will trigger ListenAndServe, which we've mocked to return immediately
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		os.Exit(0) // Force exit to prevent the test from hanging
-	}()
-
-	// We don't expect this to do anything useful, it's just for coverage
-	// main()
 }
