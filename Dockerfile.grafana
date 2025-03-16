@@ -20,3 +20,4 @@ COPY grafana/provisioning/dashboards/dashboard.yaml /etc/grafana/provisioning/da
 # Copy dashboard JSON files
 COPY grafana/provisioning/dashboards/executive-dashboard.json /var/lib/grafana/dashboards/
 COPY grafana/provisioning/dashboards/repository-metrics.json /var/lib/grafana/dashboards/
+COPY grafana/provisioning/dashboards/valid-secrets-cleanup.json /var/lib/grafana/dashboards/
